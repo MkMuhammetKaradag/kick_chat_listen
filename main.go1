@@ -1,0 +1,473 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/PuerkitoBio/goquery"
+	"github.com/gorilla/mux"
+	"github.com/gorilla/websocket"
+	"github.com/rs/cors"
+)
+
+// WebSocket upgrader
+var upgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool {
+		return true // Production'da daha güvenli hale getirin
+	},
+}
+
+// Chat mesajı yapısı
+type ChatMessage struct {
+	ID        string `json:"id"`
+	Username  string `json:"username"`
+	Content   string `json:"content"`
+	Timestamp string `json:"timestamp"`
+	Channel   string `json:"channel"`
+}
+
+// Channel bilgisi
+type ChannelInfo struct {
+	ID           int    `json:"id"`
+	Slug         string `json:"slug"`
+	ChatroomID   int    `json:"chatroom_id"`
+	UserID       int    `json:"user_id"`
+	IsLive       bool   `json:"is_live"`
+}
+
+// WebSocket bağlantıları
+var clients = make(map[*websocket.Conn]string)
+var broadcast = make(chan ChatMessage)
+
+func main() {
+	r := mux.NewRouter()
+
+	// API endpoints
+	r.HandleFunc("/api/start-listening/{username}", startListening).Methods("POST")
+	r.HandleFunc("/api/stop-listening/{username}", stopListening).Methods("POST")
+	r.HandleFunc("/ws", handleWebSocket)
+
+	// CORS ayarları
+	c := cors.New(cors.Options{
+		AllowedOrigins:   []string{"http://localhost:3000"}, // React app URL'i
+		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE"},
+		AllowedHeaders:   []string{"*"},
+		AllowCredentials: true,
+	})
+
+	handler := c.Handler(r)
+
+	// Broadcast goroutine'i başlat
+	go handleMessages()
+
+	log.Println("Server started on :8080")
+	log.Fatal(http.ListenAndServe(":8080", handler))
+}
+
+// WebSocket bağlantısını handle et
+func handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Println("WebSocket upgrade error:", err)
+		return
+	}
+	defer conn.Close()
+
+	// Client'i kaydet
+	clients[conn] = ""
+
+	for {
+		var msg map[string]interface{}
+		err := conn.ReadJSON(&msg)
+		if err != nil {
+			log.Println("WebSocket read error:", err)
+			delete(clients, conn)
+			break
+		}
+
+		// Client'tan gelen mesajları handle et
+		if action, ok := msg["action"].(string); ok {
+			switch action {
+			case "join":
+				if username, ok := msg["username"].(string); ok {
+					clients[conn] = username
+					log.Printf("Client joined: %s", username)
+				}
+			}
+		}
+	}
+}
+
+// Kick.com'dan channel bilgilerini al
+func getChannelInfo(username string) (*ChannelInfo, error) {
+	url := fmt.Sprintf("https://kick.com/api/v2/channels/%s", username)
+	
+	client := &http.Client{
+		Timeout: 15 * time.Second,
+	}
+	
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	
+	// Daha kapsamlı header'lar ekle
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	req.Header.Set("Accept", "application/json, text/plain, */*")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
+	req.Header.Set("Connection", "keep-alive")
+	req.Header.Set("Sec-Fetch-Dest", "empty")
+	req.Header.Set("Sec-Fetch-Mode", "cors")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	req.Header.Set("Referer", "https://kick.com/")
+	req.Header.Set("Origin", "https://kick.com")
+	
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("API Response Status: %d", resp.StatusCode)
+		log.Printf("API Response Headers: %+v", resp.Header)
+		
+		// 403 hatası durumunda alternatif yöntem dene
+		if resp.StatusCode == 403 {
+			return getChannelInfoAlternative(username)
+		}
+		
+		return nil, fmt.Errorf("API error: %d", resp.StatusCode)
+	}
+
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+
+	log.Printf("API Response: %+v", result)
+
+	channelInfo := &ChannelInfo{}
+	
+	if id, ok := result["id"].(float64); ok {
+		channelInfo.ID = int(id)
+	}
+	
+	if slug, ok := result["slug"].(string); ok {
+		channelInfo.Slug = slug
+	}
+	
+	if chatroomID, ok := result["chatroom_id"].(float64); ok {
+		channelInfo.ChatroomID = int(chatroomID)
+	}
+	
+	if userID, ok := result["user_id"].(float64); ok {
+		channelInfo.UserID = int(userID)
+	}
+	
+	if livestream, ok := result["livestream"].(map[string]interface{}); ok && livestream != nil {
+		channelInfo.IsLive = true
+	}
+
+	log.Printf("Parsed Channel Info: %+v", channelInfo)
+	return channelInfo, nil
+}
+
+// Alternatif yöntem: Manuel olarak chatroom ID'sini belirle
+func getChannelInfoAlternative(username string) (*ChannelInfo, error) {
+	log.Printf("Using alternative method for %s", username)
+	
+	// Burada sabit bir chatroom ID kullanacağız
+	// Gerçekte bu bilgiyi farklı yollarla alabilirsin
+	channelInfo := &ChannelInfo{
+		ID:         0, // Bilinmiyor
+		Slug:       username,
+		ChatroomID: 0, // Bu problematik, dinamik olarak bulmalıyız
+		UserID:     0,
+		IsLive:     true,
+	}
+	
+	// Chatroom ID'sini manuel olarak bul
+	chatroomID, err := findChatroomID(username)
+	if err != nil {
+		return nil, err
+	}
+	
+	channelInfo.ChatroomID = chatroomID
+	
+	log.Printf("Alternative Channel Info: %+v", channelInfo)
+	return channelInfo, nil
+}
+
+// Chatroom ID'sini bulmak için alternatif yöntem
+func findChatroomID(username string) (int, error) {
+	// Bu fonksiyon şu yöntemlerden birini kullanabilir:
+	// 1. Kick.com'un ana sayfasından scraping
+	// 2. Önceden bilinen chatroom ID'lerini kullan
+	// 3. WebSocket'e bağlanıp tüm kanalları dinle
+	
+	// Şimdilik test için sabit bir ID dönelim
+	// Gerçek uygulamada bu dinamik olmalı
+	
+	log.Printf("Finding chatroom ID for %s", username)
+	
+	// Bu bilgiyi daha önce topladığınız verilerden alabilirsiniz
+	// Veya scraping ile bulabilirsiniz
+	
+	// Örnek: Bilinen bazı chatroom ID'leri
+	knownChatrooms := map[string]int{
+		"buraksakinol": 0, // Gerçek ID'yi bulacağız
+		"elraenn":      0,
+		"wtcn":         0,
+	}
+	
+	if id, exists := knownChatrooms[username]; exists && id > 0 {
+		return id, nil
+	}
+	
+	// Eğer bilinmiyorsa, scraping yap
+	return scrapeChatroomID(username)
+}
+
+// Web scraping ile chatroom ID'sini bul
+func scrapeChatroomID(username string) (int, error) {
+	url := fmt.Sprintf("https://kick.com/%s", username)
+	
+	client := &http.Client{
+		Timeout: 15 * time.Second,
+	}
+	
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return 0, err
+	}
+	
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.5")
+	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
+	req.Header.Set("Connection", "keep-alive")
+	req.Header.Set("Upgrade-Insecure-Requests", "1")
+	
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("scraping error: %d", resp.StatusCode)
+	}
+	
+	// HTML'i parse et
+	doc, err := goquery.NewDocumentFromReader(resp.Body)
+	if err != nil {
+		return 0, err
+	}
+	
+	// Script tag'lerinde chatroom ID'sini ara
+	var chatroomID int
+	doc.Find("script").Each(func(i int, s *goquery.Selection) {
+		text := s.Text()
+		
+		// Debug için script içeriğini logla (sadece chatroom kelimesi geçenler)
+		if strings.Contains(text, "chatroom") {
+			log.Printf("Found script with chatroom: %s", text[:min(200, len(text))])
+		}
+		
+		// "chatroom":{..."id":123456...} formatını ara
+		chatroomRegex := regexp.MustCompile(`"chatroom":\s*{[^}]*"id":\s*(\d+)`)
+		matches := chatroomRegex.FindStringSubmatch(text)
+		if len(matches) > 1 {
+			if id, err := strconv.Atoi(matches[1]); err == nil {
+				chatroomID = id
+				log.Printf("Found chatroom ID: %d", chatroomID)
+			}
+		}
+		
+		// Alternatif pattern'lar
+		patterns := []string{
+			`"chatroom_id":\s*(\d+)`,
+			`chatroom.*?id.*?(\d+)`,
+			`"id":\s*(\d+)[^}]*chatroom`,
+			`window\.__INITIAL_STATE__.*?"chatroom_id":\s*(\d+)`,
+		}
+		
+		for _, pattern := range patterns {
+			regex := regexp.MustCompile(pattern)
+			matches := regex.FindStringSubmatch(text)
+			if len(matches) > 1 {
+				if id, err := strconv.Atoi(matches[1]); err == nil {
+					chatroomID = id
+					log.Printf("Found chatroom ID with pattern %s: %d", pattern, chatroomID)
+				}
+			}
+		}
+	})
+	
+	if chatroomID == 0 {
+		return 0, fmt.Errorf("could not find chatroom ID for %s", username)
+	}
+	
+	return chatroomID, nil
+}
+
+// Chat dinlemeyi başlat
+func startListening(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	username := vars["username"]
+
+	log.Printf("Starting to listen to %s's chat", username)
+
+	// Channel bilgilerini al
+	channelInfo, err := getChannelInfo(username)
+	if err != nil {
+		http.Error(w, "Channel not found", http.StatusNotFound)
+		return
+	}
+
+	// Goroutine'de chat'i dinle
+	go listenToKickChat(channelInfo)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"status":  "started",
+		"channel": username,
+	})
+}
+
+// Chat dinlemeyi durdur
+func stopListening(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	username := vars["username"]
+
+	log.Printf("Stopping listening to %s's chat", username)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"status":  "stopped",
+		"channel": username,
+	})
+}
+
+// Kick chat'ini dinle
+func listenToKickChat(channelInfo *ChannelInfo) {
+	// Kick'in gerçek WebSocket URL'ini kullan
+	wsURL := "wss://ws-us2.pusher.com/app/32cbd69e4b950bf97679?protocol=7&client=js&version=4.2.0&flash=false"
+	
+	headers := http.Header{}
+	headers.Add("Origin", "https://kick.com")
+	headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+	
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, headers)
+	if err != nil {
+		log.Printf("Kick WebSocket connection error: %v", err)
+		return
+	}
+	defer conn.Close()
+
+	// İlk connection mesajını bekle ve handle et
+	for {
+		var message map[string]interface{}
+		err := conn.ReadJSON(&message)
+		if err != nil {
+			log.Printf("Read error: %v", err)
+			break
+		}
+		
+		log.Printf("Received message: %+v", message)
+		
+		// Connection kurulduğunda subscribe ol
+		if event, ok := message["event"].(string); ok && event == "pusher:connection_established" {
+			// Chatroom'a subscribe ol
+			channelName := fmt.Sprintf("chatrooms.%d.v2", channelInfo.ChatroomID)
+			
+			subscribeMsg := map[string]interface{}{
+				"event": "pusher:subscribe",
+				"data": map[string]string{
+					"channel": channelName,
+				},
+			}
+
+			if err := conn.WriteJSON(subscribeMsg); err != nil {
+				log.Printf("Subscribe error: %v", err)
+				return
+			}
+
+			log.Printf("Subscribed to channel: %s (Chatroom ID: %d)", channelInfo.Slug, channelInfo.ChatroomID)
+			continue
+		}
+		
+		// Subscription confirmation
+		if event, ok := message["event"].(string); ok && event == "pusher:subscription_succeeded" {
+			log.Printf("Successfully subscribed to channel!")
+			continue
+		}
+
+		// Chat mesajını parse et
+		if event, ok := message["event"].(string); ok && event == "App\\Events\\ChatMessageEvent" {
+			if data, ok := message["data"].(string); ok {
+				var chatData map[string]interface{}
+				if err := json.Unmarshal([]byte(data), &chatData); err == nil {
+					processChatMessage(chatData, channelInfo.Slug)
+				}
+			}
+		}
+	}
+}
+
+// Chat mesajını işle
+func processChatMessage(data map[string]interface{}, channel string) {
+	// Mesaj verilerini parse et
+	if sender, ok := data["sender"].(map[string]interface{}); ok {
+		if username, ok := sender["username"].(string); ok {
+			if content, ok := data["content"].(string); ok {
+				chatMsg := ChatMessage{
+					ID:        generateID(),
+					Username:  username,
+					Content:   content,
+					Timestamp: time.Now().Format(time.RFC3339),
+					Channel:   channel,
+				}
+
+				// Mesajı broadcast et
+				broadcast <- chatMsg
+			}
+		}
+	}
+}
+
+// Mesajları tüm client'lara gönder
+func handleMessages() {
+	for {
+		msg := <-broadcast
+		for client, _ := range clients {
+			err := client.WriteJSON(msg)
+			if err != nil {
+				log.Printf("WebSocket write error: %v", err)
+				client.Close()
+				delete(clients, client)
+			}
+		}
+	}
+}
+
+// Basit ID generator
+func generateID() string {
+	return fmt.Sprintf("%d", time.Now().UnixNano())
+}
+
+// Helper function
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}

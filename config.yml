@@ -1,0 +1,8 @@
+app:
+  name: 'kick chat listen '
+  version: '1.0.0'
+  description: 'kick channel  chat listen'
+
+server:
+  port: 8080
+  host: 'localhost'

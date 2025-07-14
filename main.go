@@ -1,31 +1,13 @@
 package main
 
-import (
-	"kick-chat/chat"
-	"kick-chat/config"
-)
+import "github.com/gofiber/fiber/v2"
 
 func main() {
-	config.LoadEnv()
+	app := fiber.New()
 
-	usernames := chat.GetUsernames()
-	if len(usernames) == 0 {
-		return
-	}
+	app.Get("/", func(c *fiber.Ctx) error {
+		return c.SendString("Hello, World!")
+	})
 
-	err := chat.FetchChatIds(usernames)
-	if err != nil {
-		return
-	}
-
-	chat.DisplayConnectedChannels()
-
-	dataChannel := make(chan config.Data, 100)
-	go chat.HandleDataChannelInserts(dataChannel)
-
-	for channelName, chatRoomId := range config.ChannelAndChatIdMap {
-		go chat.StartListeningChat(channelName, chatRoomId, dataChannel)
-	}
-
-	select {}
+	app.Listen(":3000")
 }

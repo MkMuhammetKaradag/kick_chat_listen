@@ -8,14 +8,18 @@ import (
 type HelloUseCase interface {
 	Execute(ctx context.Context, name string) (string, error)
 }
+type HelloPostgresRepository interface {
+}
 
 type helloUseCase struct {
 	text string
+	repo HelloPostgresRepository
 }
 
-func NewhelloUseCase(text string) HelloUseCase {
+func NewhelloUseCase(repo HelloPostgresRepository, text string) HelloUseCase {
 	return &helloUseCase{
 		text: text,
+		repo: repo,
 	}
 }
 

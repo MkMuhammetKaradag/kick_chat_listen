@@ -18,8 +18,8 @@ type Handlers struct {
 	// Diğer handler'lar
 }
 
-func SetupHTTPHandlers() *Handlers {
+func SetupHTTPHandlers(postgresRepo PostgresRepository) *Handlers {
 	return &Handlers{
-		Hello: handlers.NewHelloHandler(usecase.NewhelloUseCase("naber")),
+		Hello: handlers.NewHelloHandler(usecase.NewhelloUseCase(postgresRepo, "naber")),
 	}
 }

@@ -7,8 +7,9 @@ import (
 )
 
 type Config struct {
-	App    AppConfig    `mapstructure:"app"`
-	Server ServerConfig `mapstructure:"server"`
+	App      AppConfig      `mapstructure:"app"`
+	Server   ServerConfig   `mapstructure:"server"`
+	Postgres PostgresConfig `mapstructure:"postgres"`
 }
 
 type AppConfig struct {
@@ -20,6 +21,13 @@ type ServerConfig struct {
 	Port        string `mapstructure:"port"`
 	Host        string `mapstructure:"host"`
 	Description string `mapstructure:"description"`
+}
+type PostgresConfig struct {
+	Port     string `mapstructure:"port"`
+	Host     string `mapstructure:"host"`
+	User     string `mapstructure:"user"`
+	Password string `mapstructure:"password"`
+	DB       string `mapstructure:"db"`
 }
 
 func Read() (*Config, error) {

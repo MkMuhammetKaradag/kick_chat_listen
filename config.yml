@@ -6,3 +6,11 @@ app:
 server:
   port: 8080
   host: 'localhost'
+
+postgres:
+  port: 5432
+  user: 'myuser'
+  password: 'mypassword'
+  db: 'kickdb'
+  host: 'localhost'
+  image: kick-chat-postgres

@@ -14,6 +14,7 @@ type App struct {
 	config       *config.Config
 	fiberApp     *fiber.App
 	httpHandlers *Handlers
+	postgresRepo PostgresRepository
 }
 
 func NewApp(config *config.Config) (*App, error) {
@@ -28,11 +29,15 @@ func NewApp(config *config.Config) (*App, error) {
 
 func (a *App) initDependencies() {
 
+	//database bağlantisi oluştur
+	a.postgresRepo = InitDatabase(a.config)
+
 	// HTTP handler'larını hazırla
-	a.httpHandlers = SetupHTTPHandlers()
+	a.httpHandlers = SetupHTTPHandlers(a.postgresRepo)
 
 	// HTTP sunucusu kurulumu
 	a.fiberApp = SetupServer(a.config, a.httpHandlers)
+
 }
 
 // func (a *App) Start() {

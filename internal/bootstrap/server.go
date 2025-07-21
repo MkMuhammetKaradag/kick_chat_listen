@@ -22,8 +22,10 @@ func SetupServer(config *config.Config, httpHandlers *Handlers) *fiber.App {
 	app := server.NewFiberApp(serverConfig)
 
 	helloHandler := httpHandlers.Hello
+	listenHandler := httpHandlers.Listen
 
 	app.Get("/hello/:name", handler.HandleBasic[handlers.HelloRequest, handlers.HelloResponse](helloHandler))
+	app.Post("/listen/:username", handler.HandleBasic[handlers.ListenRequest, handlers.ListenResponse](listenHandler))
 
 	return app
 }

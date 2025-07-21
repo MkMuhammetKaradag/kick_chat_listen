@@ -14,12 +14,14 @@ import (
 //		}
 //	}
 type Handlers struct {
-	Hello *handlers.HelloHandler
+	Hello  *handlers.HelloHandler
+	Listen *handlers.ListenHandler
 	// Diğer handler'lar
 }
 
 func SetupHTTPHandlers(postgresRepo PostgresRepository) *Handlers {
 	return &Handlers{
-		Hello: handlers.NewHelloHandler(usecase.NewhelloUseCase(postgresRepo, "naber")),
+		Hello:  handlers.NewHelloHandler(usecase.NewhelloUseCase(postgresRepo, "naber")),
+		Listen: handlers.NewListenHandler(usecase.NewListenUseCase(postgresRepo)),
 	}
 }

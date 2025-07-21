@@ -7,15 +7,11 @@ import (
 	"io"
 	"kick-chat/config"
 	"net/http"
-	"regexp"
-	"strconv"
 	"time"
 )
 
 func GetChatIdFromKick(username string) (int, error) {
 	methods := []func(string) (int, error){
-		getChatIdFromWebPage,
-		getChatIdFromAPIv2,
 		getChatIdFromRapidAPI,
 	}
 	for _, method := range methods {
@@ -27,67 +23,7 @@ func GetChatIdFromKick(username string) (int, error) {
 	return 0, fmt.Errorf("tüm yöntemler başarısız")
 }
 
-func getChatIdFromWebPage(username string) (int, error) {
-	client := &http.Client{Timeout: 10 * time.Second}
-	url := fmt.Sprintf("https://kick.com/%s", username)
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return 0, err
-	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8")
-	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
-	resp, err := client.Do(req)
-	if err != nil {
-		return 0, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return 0, fmt.Errorf("sayfa yüklenemedi: %d", resp.StatusCode)
-	}
-	body, err := readResponseBody(resp)
-	if err != nil {
-		return 0, err
-	}
-	chatRoomRegex := regexp.MustCompile(`"chatroom":\s*{\s*"id":\s*(\d+)`)
-	matches := chatRoomRegex.FindStringSubmatch(string(body))
-	if len(matches) < 2 {
-		return 0, fmt.Errorf("HTML'de chat ID bulunamadı")
-	}
-	chatId, err := strconv.Atoi(matches[1])
-	if err != nil {
-		return 0, err
-	}
-	return chatId, nil
-}
 
-func getChatIdFromAPIv2(username string) (int, error) {
-	client := &http.Client{Timeout: 10 * time.Second}
-	url := fmt.Sprintf("https://kick.com/api/v2/channels/%s", username)
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return 0, err
-	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-	req.Header.Set("Accept", "application/json")
-	resp, err := client.Do(req)
-	if err != nil {
-		return 0, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return 0, fmt.Errorf("API v2 erişilemedi: %d", resp.StatusCode)
-	}
-	var channelData struct {
-		Chatroom struct {
-			ID int `json:"id"`
-		} `json:"chatroom"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&channelData); err != nil {
-		return 0, err
-	}
-	return channelData.Chatroom.ID, nil
-}
 
 func getChatIdFromRapidAPI(username string) (int, error) {
 	fmt.Println("rapid_api:", config.GetRapidAPIKey())

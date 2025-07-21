@@ -3,6 +3,7 @@ package main
 import (
 	"kick-chat/internal/bootstrap"
 	"kick-chat/internal/config"
+	usecase "kick-chat/internal/usecases/chat"
 	"log"
 
 	_ "kick-chat/logging"
@@ -20,7 +21,7 @@ func main() {
 	if err != nil {
 		log.Fatal("Bootstrap error:", err)
 	}
-
+	usecase.ListenerManager = usecase.NewListenerManager()
 	if err := app.Start(); err != nil {
 		log.Fatal("Server error:", zap.Error(err)) // Structured logging
 	}

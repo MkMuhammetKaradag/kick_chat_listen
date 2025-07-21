@@ -38,7 +38,7 @@ const (
 			expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
 			created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 		)`
-	// Bizim proje için Listener tablosu
+	// listener tablosu 
 	createListenersTable = `
 		CREATE TABLE IF NOT EXISTS listeners (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -50,7 +50,7 @@ const (
 			updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 		);`
 
-	// Bizim proje için UserListenerRequest tablosu
+	// UserListenerRequest tablosu
 	createUserListenerRequestsTable = `
 		CREATE TABLE IF NOT EXISTS user_listener_requests (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

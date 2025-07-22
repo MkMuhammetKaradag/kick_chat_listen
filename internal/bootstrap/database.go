@@ -11,14 +11,14 @@ import (
 type PostgresRepository interface {
 	InsertListener(username string, isActive bool, endTime *time.Time, duration int) (uuid.UUID, error)
 	InsertUserListenerRequest(listenerID uuid.UUID, userID string, requestTime time.Time, endTime time.Time) error
-	GetListenerByUsername(username string) (*struct { // Anonim struct kullanabiliriz veya Listener struct'ını import edebiliriz.
+	GetListenerByUsername(username string) (*struct {
 		ID       uuid.UUID
 		Username string
 		IsActive bool
 		EndTime  *time.Time
 		Duration int
 	}, error)
-	GetActiveListeners() ([]struct { // Anonim struct
+	GetActiveListeners() ([]struct {
 		ID       uuid.UUID
 		Username string
 		IsActive bool
@@ -30,7 +30,19 @@ type PostgresRepository interface {
 		RequestTime time.Time
 		EndTime     time.Time
 	}, error)
-	InsertMessage(listenerID uuid.UUID, senderUsername, content string, timestamp time.Time) error
+	// GÜNCELLENDİ: InsertMessage fonksiyonu link bilgilerini de alıyor
+	InsertMessage(listenerID uuid.UUID, senderUsername, content string, timestamp time.Time, hasLink bool, extractedLinks []string) error
+	// YENİ: Eklenen fonksiyonlar
+	UpdateListenerStatus(listenerID uuid.UUID, isActive bool) error
+	UpdateListenerEndTime(listenerID uuid.UUID, endTime time.Time) error
+	GetMessagesByListener(listenerID uuid.UUID, limit, offset int) ([]struct {
+		ID               uuid.UUID
+		SenderUsername   string
+		Content          string
+		MessageTimestamp time.Time
+		HasLink          bool
+		ExtractedLinks   []string
+	}, error)
 }
 
 func InitDatabase(config *config.Config) PostgresRepository {

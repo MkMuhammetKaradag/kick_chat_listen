@@ -28,7 +28,7 @@ func (r *Repository) InsertUserListenerRequest(listenerID uuid.UUID, userID stri
 	return nil
 }
 
-func (r *Repository) GetListenerByUsername(username string) (*struct { // Anonim struct kullanabiliriz veya Listener struct'ını import edebiliriz.
+func (r *Repository) GetListenerByUsername(username string) (*struct {
 	ID       uuid.UUID
 	Username string
 	IsActive bool
@@ -53,8 +53,7 @@ func (r *Repository) GetListenerByUsername(username string) (*struct { // Anonim
 	return &listenerData, nil
 }
 
-// Örnek: Aktif listener'ları alma fonksiyonu
-func (r *Repository) GetActiveListeners() ([]struct { // Anonim struct
+func (r *Repository) GetActiveListeners() ([]struct {
 	ID       uuid.UUID
 	Username string
 	IsActive bool
@@ -69,7 +68,6 @@ func (r *Repository) GetActiveListeners() ([]struct { // Anonim struct
 		Duration int
 	}
 	now := time.Now()
-	// Aktif olan ve süresi geçmemiş listener'ları getir
 	query := `SELECT id, username, is_active, end_time, duration FROM listeners WHERE is_active = true AND (end_time IS NULL OR end_time > $1);`
 	rows, err := r.db.Query(query, now)
 	if err != nil {
@@ -97,7 +95,6 @@ func (r *Repository) GetActiveListeners() ([]struct { // Anonim struct
 	return listeners, nil
 }
 
-// Örnek: Belirli bir listener'a ait user listener request'lerini alma fonksiyonu
 func (r *Repository) GetUserRequestsForListener(listenerID uuid.UUID) ([]struct {
 	UserID      string
 	RequestTime time.Time
@@ -133,11 +130,88 @@ func (r *Repository) GetUserRequestsForListener(listenerID uuid.UUID) ([]struct 
 	}
 	return requests, nil
 }
-func (r *Repository) InsertMessage(listenerID uuid.UUID, senderUsername, content string, timestamp time.Time) error {
-	query := `INSERT INTO messages (listener_id, sender_username, content, message_timestamp) VALUES ($1, $2, $3, $4);`
-	_, err := r.db.Exec(query, listenerID, senderUsername, content, timestamp)
+
+// GÜNCELLENDİ: InsertMessage fonksiyonu link bilgilerini de kaydediyor
+func (r *Repository) InsertMessage(listenerID uuid.UUID, senderUsername, content string, timestamp time.Time, hasLink bool, extractedLinks []string) error {
+	query := `INSERT INTO messages (listener_id, sender_username, content, message_timestamp, has_link, extracted_links) VALUES ($1, $2, $3, $4, $5, $6);`
+	_, err := r.db.Exec(query, listenerID, senderUsername, content, timestamp, hasLink, extractedLinks)
 	if err != nil {
 		return fmt.Errorf("mesaj kaydedilirken hata: %w", err)
 	}
 	return nil
+}
+
+// YENİ: Listener durumunu güncellemek için
+func (r *Repository) UpdateListenerStatus(listenerID uuid.UUID, isActive bool) error {
+	query := `UPDATE listeners SET is_active = $1, updated_at = NOW() WHERE id = $2;`
+	_, err := r.db.Exec(query, isActive, listenerID)
+	if err != nil {
+		return fmt.Errorf("listener durumu güncellenirken hata: %w", err)
+	}
+	return nil
+}
+
+// YENİ: Listener end_time güncellemek için
+func (r *Repository) UpdateListenerEndTime(listenerID uuid.UUID, endTime time.Time) error {
+	query := `UPDATE listeners SET end_time = $1, updated_at = NOW() WHERE id = $2;`
+	_, err := r.db.Exec(query, endTime, listenerID)
+	if err != nil {
+		return fmt.Errorf("listener end_time güncellenirken hata: %w", err)
+	}
+	return nil
+}
+
+// YENİ: Mesajları çekmek için fonksiyonlar
+func (r *Repository) GetMessagesByListener(listenerID uuid.UUID, limit, offset int) ([]struct {
+	ID               uuid.UUID
+	SenderUsername   string
+	Content          string
+	MessageTimestamp time.Time
+	HasLink          bool
+	ExtractedLinks   []string
+}, error) {
+	var messages []struct {
+		ID               uuid.UUID
+		SenderUsername   string
+		Content          string
+		MessageTimestamp time.Time
+		HasLink          bool
+		ExtractedLinks   []string
+	}
+
+	query := `SELECT id, sender_username, content, message_timestamp, has_link, extracted_links 
+			  FROM messages 
+			  WHERE listener_id = $1 
+			  ORDER BY message_timestamp DESC 
+			  LIMIT $2 OFFSET $3;`
+
+	rows, err := r.db.Query(query, listenerID, limit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("mesajlar getirilirken hata: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var msg struct {
+			ID               uuid.UUID
+			SenderUsername   string
+			Content          string
+			MessageTimestamp time.Time
+			HasLink          bool
+			ExtractedLinks   []string
+		}
+
+		// PostgreSQL array'ini Go slice'ına çevirmek için pq.Array kullanın
+		if err := rows.Scan(&msg.ID, &msg.SenderUsername, &msg.Content, &msg.MessageTimestamp, &msg.HasLink, &msg.ExtractedLinks); err != nil {
+			log.Printf("Mesaj satırı okunurken hata: %v", err)
+			continue
+		}
+		messages = append(messages, msg)
+	}
+
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("mesaj satır döngüsü hatası: %w", err)
+	}
+
+	return messages, nil
 }

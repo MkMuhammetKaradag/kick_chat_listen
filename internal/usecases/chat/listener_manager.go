@@ -61,6 +61,7 @@ var AppConfig *Config = &Config{
 func getChatId(username string) (int, error) {
 	// 1. Bilinen ID'leri kontrol et
 	if knownId := getKnownChatId(username); knownId != 0 {
+		fmt.Println("localde kayıtlıydı:", knownId)
 		return knownId, nil
 	}
 
@@ -144,7 +145,8 @@ func (u *listenUseCase) startListening(info *ListenerInfo) {
 			}
 
 			// Mesajı işle ve dataChannel'a gönder
-			go unmarshallAndSendToChannel(info, msgByte)
+
+			go u.unmarshallAndSendToChannel(info, msgByte)
 
 			// Sohbet mesajını ayrıştırıp veritabanına kaydetme
 			// (Bu işi ayrı bir goroutine'de yapabiliriz)
@@ -163,11 +165,8 @@ func (u *listenUseCase) startListening(info *ListenerInfo) {
 					if err := json.Unmarshal([]byte(rawDataString), &data); err != nil {
 						return
 					}
-					// Mesajı veritabanına kaydet
-					// if err := u.repo.InsertMessage(info.ListenerDBID, data.Sender.Username, data.Content, data.Timestamp); err != nil {
-					// 	log.Printf("'%s' için mesaj veritabanına kaydedilirken hata: %v", info.Username, err)
-					// }
-					fmt.Println(data.Content)
+
+					// fmt.Println(data.Content)
 					// Linkleri ayıklama ve gösterme
 					if linkRegex.MatchString(data.Content) {
 						links := linkRegex.FindAllString(data.Content, -1)

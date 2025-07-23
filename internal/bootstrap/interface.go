@@ -16,6 +16,7 @@ type SessionManager interface {
 	DeleteSession(ctx context.Context, token string) error
 	DeleteAllUserSessions(ctx context.Context, userID string) error
 	GetSession(ctx context.Context, token string) (*domain.Session, error)
+	IsValid(ctx context.Context, token string) bool
 }
 
 func InitSessionRedis(config *config.Config) SessionManager {

@@ -23,7 +23,7 @@ type Config struct {
 }
 
 type UserRequestInfo struct {
-	UserID      string
+	UserID      uuid.UUID
 	RequestTime time.Time
 	EndTime     time.Time
 }
@@ -31,7 +31,7 @@ type UserRequestInfo struct {
 type ListenerInfo struct {
 	Username       string
 	Client         *websocket.Conn
-	UserRequests   map[string]UserRequestInfo
+	UserRequests   map[uuid.UUID]UserRequestInfo
 	OverallEndTime time.Time
 	IsGlobalActive bool
 	ListenerDBID   uuid.UUID

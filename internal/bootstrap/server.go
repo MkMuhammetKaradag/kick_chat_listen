@@ -5,13 +5,14 @@ import (
 	"kick-chat/internal/config"
 	authHandlers "kick-chat/internal/handlers/auth"
 	chatHandlers "kick-chat/internal/handlers/chat"
+	"kick-chat/internal/middleware"
 	"kick-chat/server"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
 )
 
-func SetupServer(config *config.Config, httpHandlers *Handlers) *fiber.App {
+func SetupServer(config *config.Config, httpHandlers *Handlers, sessionManager SessionManager) *fiber.App {
 
 	serverConfig := server.Config{
 		Port:         config.Server.Port,
@@ -26,11 +27,15 @@ func SetupServer(config *config.Config, httpHandlers *Handlers) *fiber.App {
 	listenHandler := httpHandlers.Listen
 	signupHandler := httpHandlers.Signup
 	signinHandler := httpHandlers.Signin
-
+	authMiddleware := middleware.NewAuthMiddleware(sessionManager)
 	app.Get("/hello/:name", handler.HandleBasic[chatHandlers.HelloRequest, chatHandlers.HelloResponse](helloHandler))
 	app.Post("/signup", handler.HandleBasic[authHandlers.SignUpRequest, authHandlers.SignUpResponse](signupHandler))
 	app.Post("/signin", handler.HandleWithFiber[authHandlers.SignInRequest, authHandlers.SignInResponse](signinHandler))
-	app.Post("/listen/:username", handler.HandleBasic[chatHandlers.ListenRequest, chatHandlers.ListenResponse](listenHandler))
+
+	protected := app.Group("/", authMiddleware.Authenticate())
+	{
+		protected.Post("/listen/:username", handler.HandleWithFiber[chatHandlers.ListenRequest, chatHandlers.ListenResponse](listenHandler))
+	}
 
 	return app
 }

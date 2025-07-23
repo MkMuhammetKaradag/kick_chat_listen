@@ -11,24 +11,30 @@ import (
 )
 
 type PostgresRepository interface {
-	InsertListener(username string, isActive bool, endTime *time.Time, duration int) (uuid.UUID, error)
-	InsertUserListenerRequest(listenerID uuid.UUID, userID string, requestTime time.Time, endTime time.Time) error
-	GetListenerByUsername(username string) (*struct {
-		ID       uuid.UUID
-		Username string
-		IsActive bool
-		EndTime  *time.Time
-		Duration int
+	InsertListener(streamerUsername string, userID uuid.UUID, isActive bool, endTime *time.Time, duration int) (uuid.UUID, error)
+
+	InsertUserListenerRequest(listenerID uuid.UUID, userID uuid.UUID, requestTime time.Time, endTime time.Time) error
+
+	GetListenerByStreamerUsername(streamerUsername string) (*struct {
+		ID               uuid.UUID
+		StreamerUsername string
+		UserID           uuid.UUID
+		IsActive         bool
+		EndTime          *time.Time
+		Duration         int
 	}, error)
+
 	GetActiveListeners() ([]struct {
-		ID       uuid.UUID
-		Username string
-		IsActive bool
-		EndTime  *time.Time
-		Duration int
+		ID               uuid.UUID
+		StreamerUsername string
+		UserID           uuid.UUID
+		IsActive         bool
+		EndTime          *time.Time
+		Duration         int
 	}, error)
+
 	GetUserRequestsForListener(listenerID uuid.UUID) ([]struct {
-		UserID      string
+		UserID      uuid.UUID
 		RequestTime time.Time
 		EndTime     time.Time
 	}, error)

@@ -9,17 +9,17 @@ import (
 	"github.com/google/uuid"
 )
 
-func (r *Repository) InsertListener(username string, isActive bool, endTime *time.Time, duration int) (uuid.UUID, error) {
+func (r *Repository) InsertListener(streamerUsername string, userID uuid.UUID, isActive bool, endTime *time.Time, duration int) (uuid.UUID, error) {
 	var listenerID uuid.UUID
-	query := `INSERT INTO listeners (username, is_active, end_time, duration) VALUES ($1, $2, $3, $4) RETURNING id;`
-	err := r.db.QueryRow(query, username, isActive, endTime, duration).Scan(&listenerID)
+	query := `INSERT INTO listeners (streamer_username, user_id, is_active, end_time, duration) VALUES ($1, $2, $3, $4, $5) RETURNING id;`
+	err := r.db.QueryRow(query, streamerUsername, userID, isActive, endTime, duration).Scan(&listenerID)
 	if err != nil {
 		return uuid.Nil, fmt.Errorf("listener eklenirken hata: %w", err)
 	}
 	return listenerID, nil
 }
 
-func (r *Repository) InsertUserListenerRequest(listenerID uuid.UUID, userID string, requestTime time.Time, endTime time.Time) error {
+func (r *Repository) InsertUserListenerRequest(listenerID uuid.UUID, userID uuid.UUID, requestTime time.Time, endTime time.Time) error {
 	query := `INSERT INTO user_listener_requests (listener_id, user_id, request_time, end_time) VALUES ($1, $2, $3, $4);`
 	_, err := r.db.Exec(query, listenerID, userID, requestTime, endTime)
 	if err != nil {
@@ -28,23 +28,26 @@ func (r *Repository) InsertUserListenerRequest(listenerID uuid.UUID, userID stri
 	return nil
 }
 
-func (r *Repository) GetListenerByUsername(username string) (*struct {
-	ID       uuid.UUID
-	Username string
-	IsActive bool
-	EndTime  *time.Time
-	Duration int
+func (r *Repository) GetListenerByStreamerUsername(streamerUsername string) (*struct {
+	ID               uuid.UUID
+	StreamerUsername string
+	UserID           uuid.UUID
+	IsActive         bool
+	EndTime          *time.Time
+	Duration         int
 }, error) {
 	var listenerData struct {
-		ID       uuid.UUID
-		Username string
-		IsActive bool
-		EndTime  *time.Time
-		Duration int
+		ID               uuid.UUID
+		StreamerUsername string
+		UserID           uuid.UUID
+		IsActive         bool
+		EndTime          *time.Time
+		Duration         int
 	}
-	query := `SELECT id, username, is_active, end_time, duration FROM listeners WHERE username = $1;`
-	row := r.db.QueryRow(query, username)
-	err := row.Scan(&listenerData.ID, &listenerData.Username, &listenerData.IsActive, &listenerData.EndTime, &listenerData.Duration)
+	// Yeni sorgu: streamer_username'e göre arama yapıyor ve yeni sütunları seçiyor.
+	query := `SELECT id, streamer_username, user_id, is_active, end_time, duration FROM listeners WHERE streamer_username = $1;`
+	row := r.db.QueryRow(query, streamerUsername)
+	err := row.Scan(&listenerData.ID, &listenerData.StreamerUsername, &listenerData.UserID, &listenerData.IsActive, &listenerData.EndTime, &listenerData.Duration)
 	if err == sql.ErrNoRows {
 		return nil, nil // Bulunamadı
 	} else if err != nil {
@@ -54,21 +57,24 @@ func (r *Repository) GetListenerByUsername(username string) (*struct {
 }
 
 func (r *Repository) GetActiveListeners() ([]struct {
-	ID       uuid.UUID
-	Username string
-	IsActive bool
-	EndTime  *time.Time
-	Duration int
+	ID               uuid.UUID
+	StreamerUsername string
+	UserID           uuid.UUID
+	IsActive         bool
+	EndTime          *time.Time
+	Duration         int
 }, error) {
 	var listeners []struct {
-		ID       uuid.UUID
-		Username string
-		IsActive bool
-		EndTime  *time.Time
-		Duration int
+		ID               uuid.UUID
+		StreamerUsername string
+		UserID           uuid.UUID
+		IsActive         bool
+		EndTime          *time.Time
+		Duration         int
 	}
 	now := time.Now()
-	query := `SELECT id, username, is_active, end_time, duration FROM listeners WHERE is_active = true AND (end_time IS NULL OR end_time > $1);`
+	// Yeni sorgu: streamer_username ve user_id sütunlarını seçiyor.
+	query := `SELECT id, streamer_username, user_id, is_active, end_time, duration FROM listeners WHERE is_active = true AND (end_time IS NULL OR end_time > $1);`
 	rows, err := r.db.Query(query, now)
 	if err != nil {
 		return nil, fmt.Errorf("aktif listener'lar getirilirken hata: %w", err)
@@ -77,13 +83,14 @@ func (r *Repository) GetActiveListeners() ([]struct {
 
 	for rows.Next() {
 		var l struct {
-			ID       uuid.UUID
-			Username string
-			IsActive bool
-			EndTime  *time.Time
-			Duration int
+			ID               uuid.UUID
+			StreamerUsername string
+			UserID           uuid.UUID
+			IsActive         bool
+			EndTime          *time.Time
+			Duration         int
 		}
-		if err := rows.Scan(&l.ID, &l.Username, &l.IsActive, &l.EndTime, &l.Duration); err != nil {
+		if err := rows.Scan(&l.ID, &l.StreamerUsername, &l.UserID, &l.IsActive, &l.EndTime, &l.Duration); err != nil {
 			log.Printf("Satır okunurken hata: %v", err)
 			continue
 		}
@@ -96,12 +103,12 @@ func (r *Repository) GetActiveListeners() ([]struct {
 }
 
 func (r *Repository) GetUserRequestsForListener(listenerID uuid.UUID) ([]struct {
-	UserID      string
+	UserID      uuid.UUID
 	RequestTime time.Time
 	EndTime     time.Time
 }, error) {
 	var requests []struct {
-		UserID      string
+		UserID      uuid.UUID
 		RequestTime time.Time
 		EndTime     time.Time
 	}
@@ -115,7 +122,7 @@ func (r *Repository) GetUserRequestsForListener(listenerID uuid.UUID) ([]struct 
 
 	for rows.Next() {
 		var req struct {
-			UserID      string
+			UserID      uuid.UUID
 			RequestTime time.Time
 			EndTime     time.Time
 		}

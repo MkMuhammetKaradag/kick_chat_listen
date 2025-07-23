@@ -36,7 +36,7 @@ const (
 		CREATE TABLE IF NOT EXISTS user_listener_requests (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 			listener_id UUID NOT NULL, -- Hangi Listener'a ait (Foreign Key)
-			user_id VARCHAR(50) NOT NULL, -- Senin sistemindeki kullanıcının ID'si (username olabilir)
+			user_id UUID REFERENCES users(id) ON DELETE CASCADE, -- Senin sistemindeki kullanıcının ID'si (username olabilir)
 			request_time TIMESTAMP WITH TIME ZONE NOT NULL, -- Bu isteğin başladığı zaman
 			end_time TIMESTAMP WITH TIME ZONE NOT NULL, -- Bu isteğin biteceği zaman
 			created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),

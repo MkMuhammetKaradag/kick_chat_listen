@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	usecase "kick-chat/internal/usecases/chat"
+
+	"github.com/gofiber/fiber/v2"
 )
 
 type ListenRequest struct {
@@ -23,9 +25,9 @@ func NewListenHandler(usecase usecase.ListenUseCase) *ListenHandler {
 	}
 }
 
-func (h *ListenHandler) Handle(ctx context.Context, req *ListenRequest) (*ListenResponse, error) {
+func (h *ListenHandler) Handle(fbrCtx *fiber.Ctx, ctx context.Context, req *ListenRequest) (*ListenResponse, error) {
 	fmt.Println("listen user:", req.UserName)
-	message, err := h.usecase.Execute(ctx, req.UserName)
+	message, err := h.usecase.Execute(fbrCtx, ctx, req.UserName)
 	if err != nil {
 		return nil, err
 	}

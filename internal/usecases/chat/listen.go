@@ -5,37 +5,47 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"kick-chat/domain"
+	"kick-chat/internal/middleware"
 	"log"
 	"net/http"
 	"regexp"
 	"time"
 
+	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
 )
 
 type ListenUseCase interface {
-	Execute(ctx context.Context, username string) (string, error)
+	Execute(fbrCtx *fiber.Ctx, ctx context.Context, username string) (string, error)
 }
 
 type ListenPostgresRepository interface {
-	InsertListener(username string, isActive bool, endTime *time.Time, duration int) (uuid.UUID, error)
-	InsertUserListenerRequest(listenerID uuid.UUID, userID string, requestTime time.Time, endTime time.Time) error
-	GetListenerByUsername(username string) (*struct {
-		ID       uuid.UUID
-		Username string
-		IsActive bool
-		EndTime  *time.Time
-		Duration int
+	// Değiştirildi
+	InsertListener(streamerUsername string, userID uuid.UUID, isActive bool, endTime *time.Time, duration int) (uuid.UUID, error)
+	// user_id'nin UUID olduğundan emin ol
+	InsertUserListenerRequest(listenerID uuid.UUID, userID uuid.UUID, requestTime time.Time, endTime time.Time) error
+	// Değiştirildi
+	GetListenerByStreamerUsername(streamerUsername string) (*struct {
+		ID               uuid.UUID
+		StreamerUsername string
+		UserID           uuid.UUID
+		IsActive         bool
+		EndTime          *time.Time
+		Duration         int
 	}, error)
+	// Değiştirildi
 	GetActiveListeners() ([]struct {
-		ID       uuid.UUID
-		Username string
-		IsActive bool
-		EndTime  *time.Time
-		Duration int
+		ID               uuid.UUID
+		StreamerUsername string
+		UserID           uuid.UUID
+		IsActive         bool
+		EndTime          *time.Time
+		Duration         int
 	}, error)
+	// Değiştirildi
 	GetUserRequestsForListener(listenerID uuid.UUID) ([]struct {
-		UserID      string
+		UserID      uuid.UUID
 		RequestTime time.Time
 		EndTime     time.Time
 	}, error)
@@ -85,8 +95,19 @@ func NewListenUseCase(repo ListenPostgresRepository) ListenUseCase {
 
 var linkRegex = regexp.MustCompile(`https?://[^\s]+`)
 
-func (u *listenUseCase) Execute(ctx context.Context, username string) (string, error) {
-	currentUserID := "test_user_" + "mami"
+func (u *listenUseCase) Execute(fbrCtx *fiber.Ctx, ctx context.Context, username string) (string, error) {
+	userData, ok := middleware.GetUserData(fbrCtx)
+	if !ok {
+		return "", domain.ErrNotFoundAuthorization
+
+	}
+	currentUserID, err := uuid.Parse(userData.UserID)
+	if err != nil {
+		return "", domain.ErrNotFoundAuthorization
+
+	}
+	fmt.Println("currentuserid:", userData.UserID)
+
 	durationToAdd := 7 * 24 * time.Hour
 	endTimeToAdd := time.Now().Add(durationToAdd)
 
@@ -104,7 +125,7 @@ func (u *listenUseCase) Execute(ctx context.Context, username string) (string, e
 	if !exists || !listenerInfo.IsGlobalActive {
 		log.Printf("'%s' için yeni listener süreci başlatılıyor...", username)
 
-		dbListenerData, err := u.repo.GetListenerByUsername(username)
+		dbListenerData, err := u.repo.GetListenerByStreamerUsername(username)
 		if err != nil {
 			log.Printf("'%s' için veritabanı kontrol hatası: %v", username, err)
 			return "veritabanı hatası", err
@@ -112,7 +133,7 @@ func (u *listenUseCase) Execute(ctx context.Context, username string) (string, e
 
 		if dbListenerData == nil {
 			log.Printf("'%s' için veritabanında Listener kaydı bulunamadı, oluşturuluyor...", username)
-			newListenerID, err := u.repo.InsertListener(username, true, &endTimeToAdd, int(durationToAdd.Seconds()))
+			newListenerID, err := u.repo.InsertListener(username, currentUserID, true, &endTimeToAdd, int(durationToAdd.Seconds()))
 			if err != nil {
 				log.Printf("Veritabanına yeni listener eklenirken hata: %v", err)
 				return "Veritabanı hatası.", err
@@ -121,7 +142,7 @@ func (u *listenUseCase) Execute(ctx context.Context, username string) (string, e
 
 			listenerInfo = &ListenerInfo{
 				Username:       username,
-				UserRequests:   make(map[string]UserRequestInfo),
+				UserRequests:   make(map[uuid.UUID]UserRequestInfo),
 				OverallEndTime: endTimeToAdd,
 				IsGlobalActive: true,
 				ListenerDBID:   listenerID,
@@ -145,7 +166,7 @@ func (u *listenUseCase) Execute(ctx context.Context, username string) (string, e
 			} else {
 				listenerInfo = &ListenerInfo{
 					Username:       username,
-					UserRequests:   make(map[string]UserRequestInfo),
+					UserRequests:   make(map[uuid.UUID]UserRequestInfo),
 					OverallEndTime: *dbListenerData.EndTime,
 					IsGlobalActive: dbListenerData.IsActive,
 					ListenerDBID:   listenerID,

@@ -46,7 +46,7 @@ func (r *Repository) SignIn(ctx context.Context, identifier, password string) (*
 		_, err := tx.ExecContext(ctx, "UPDATE users SET failed_login_attempts = $1 WHERE id = $2", failedAttempts+1, auth.ID)
 		if err != nil {
 			// Loglama mekanizması burada kullanılabilir
-			fmt.Printf("Failed to update login attempts: %v\n", err)
+			fmt.Errorf("Failed to update login attempts: %v\n", err)
 		}
 		return nil, ErrInvalidCredentials
 	}
@@ -55,7 +55,7 @@ func (r *Repository) SignIn(ctx context.Context, identifier, password string) (*
 	_, err = tx.ExecContext(ctx, "UPDATE users SET failed_login_attempts = 0, last_login = NOW() WHERE id = $1", auth.ID)
 	if err != nil {
 		// Loglama mekanizması burada kullanılabilir
-		fmt.Printf("Failed to update last login: %v\n", err)
+		fmt.Errorf("Failed to update last login: %v\n", err)
 	}
 
 	return &auth, tx.Commit()

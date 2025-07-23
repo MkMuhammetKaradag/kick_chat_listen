@@ -37,7 +37,7 @@ func (a *App) initDependencies() {
 	a.httpHandlers = SetupHTTPHandlers(a.postgresRepo, a.sessionManager)
 
 	// HTTP sunucusu kurulumu
-	a.fiberApp = SetupServer(a.config, a.httpHandlers)
+	a.fiberApp = SetupServer(a.config, a.httpHandlers, a.sessionManager)
 
 }
 

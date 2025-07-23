@@ -3,7 +3,8 @@ package bootstrap
 import (
 	"kick-chat/handler"
 	"kick-chat/internal/config"
-	handlers "kick-chat/internal/handlers/chat"
+	authHandlers "kick-chat/internal/handlers/auth"
+	chatHandlers "kick-chat/internal/handlers/chat"
 	"kick-chat/server"
 	"time"
 
@@ -23,9 +24,13 @@ func SetupServer(config *config.Config, httpHandlers *Handlers) *fiber.App {
 
 	helloHandler := httpHandlers.Hello
 	listenHandler := httpHandlers.Listen
+	signupHandler := httpHandlers.Signup
+	signinHandler := httpHandlers.Signin
 
-	app.Get("/hello/:name", handler.HandleBasic[handlers.HelloRequest, handlers.HelloResponse](helloHandler))
-	app.Post("/listen/:username", handler.HandleBasic[handlers.ListenRequest, handlers.ListenResponse](listenHandler))
+	app.Get("/hello/:name", handler.HandleBasic[chatHandlers.HelloRequest, chatHandlers.HelloResponse](helloHandler))
+	app.Post("/signup", handler.HandleBasic[authHandlers.SignUpRequest, authHandlers.SignUpResponse](signupHandler))
+	app.Post("/signin", handler.HandleWithFiber[authHandlers.SignInRequest, authHandlers.SignInResponse](signinHandler))
+	app.Post("/listen/:username", handler.HandleBasic[chatHandlers.ListenRequest, chatHandlers.ListenResponse](listenHandler))
 
 	return app
 }

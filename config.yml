@@ -14,3 +14,9 @@ postgres:
   db: 'kickdb'
   host: 'localhost'
   image: kick-chat-postgres
+
+sessionredis:
+  host: 'localhost'
+  port: '6379'
+  password: ''
+  db: 0

@@ -1,14 +1,14 @@
 services:
-  # redis:
-  #   image: redis:alpine
-  #   container_name: dc-clone-redis
-  #   ports:
-  #     - '6379:6379'
-  #   healthcheck:
-  #     test: ['CMD', 'redis-cli', 'ping']
-  #     interval: 1s
-  #     timeout: 3s
-  #     retries: 30 # Retry many times to allow for startup
+  redis:
+    image: redis:alpine
+    container_name: kick-chat-redis
+    ports:
+      - '6379:6379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 1s
+      timeout: 3s
+      retries: 30 # Retry many times to allow for startup
   postgres:
     image: postgres:15
     container_name: kick-chat-postgres

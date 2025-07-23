@@ -1,8 +1,10 @@
 package bootstrap
 
 import (
-	handlers "kick-chat/internal/handlers/chat"
-	usecase "kick-chat/internal/usecases/chat"
+	authHandlers "kick-chat/internal/handlers/auth"
+	chatHandlers "kick-chat/internal/handlers/chat"
+	authUsecase "kick-chat/internal/usecases/auth"
+	chatUsecase "kick-chat/internal/usecases/chat"
 )
 
 // func SetupHTTPHandlers() map[string]interface{} {
@@ -14,14 +16,18 @@ import (
 //		}
 //	}
 type Handlers struct {
-	Hello  *handlers.HelloHandler
-	Listen *handlers.ListenHandler
+	Hello  *chatHandlers.HelloHandler
+	Listen *chatHandlers.ListenHandler
+	Signup *authHandlers.SignUpHandler
+	Signin *authHandlers.SignInHandler
 	// Diğer handler'lar
 }
 
-func SetupHTTPHandlers(postgresRepo PostgresRepository) *Handlers {
+func SetupHTTPHandlers(postgresRepo PostgresRepository, sessionManager SessionManager) *Handlers {
 	return &Handlers{
-		Hello:  handlers.NewHelloHandler(usecase.NewhelloUseCase(postgresRepo, "naber")),
-		Listen: handlers.NewListenHandler(usecase.NewListenUseCase(postgresRepo)),
+		Hello:  chatHandlers.NewHelloHandler(chatUsecase.NewhelloUseCase(postgresRepo, "naber")),
+		Listen: chatHandlers.NewListenHandler(chatUsecase.NewListenUseCase(postgresRepo)),
+		Signup: authHandlers.NewSignUpHandler(authUsecase.NewSignUpUseCase(postgresRepo)),
+		Signin: authHandlers.NewSignInHandler(authUsecase.NewSignInUseCase(postgresRepo, sessionManager)),
 	}
 }

@@ -1,6 +1,8 @@
 package bootstrap
 
 import (
+	"context"
+	"kick-chat/domain"
 	"kick-chat/internal/config"
 	"kick-chat/internal/initializer"
 	"time"
@@ -43,6 +45,9 @@ type PostgresRepository interface {
 		HasLink          bool
 		ExtractedLinks   []string
 	}, error)
+
+	SignUp(ctx context.Context, auth *domain.User) (uuid.UUID, error)
+	SignIn(ctx context.Context, identifier, password string) (*domain.User, error)
 }
 
 func InitDatabase(config *config.Config) PostgresRepository {

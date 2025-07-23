@@ -7,9 +7,10 @@ import (
 )
 
 type Config struct {
-	App      AppConfig      `mapstructure:"app"`
-	Server   ServerConfig   `mapstructure:"server"`
-	Postgres PostgresConfig `mapstructure:"postgres"`
+	App          AppConfig          `mapstructure:"app"`
+	Server       ServerConfig       `mapstructure:"server"`
+	Postgres     PostgresConfig     `mapstructure:"postgres"`
+	SessionRedis SessionRedisConfig `mapstructure:"sessionredis"`
 }
 
 type AppConfig struct {
@@ -28,6 +29,12 @@ type PostgresConfig struct {
 	User     string `mapstructure:"user"`
 	Password string `mapstructure:"password"`
 	DB       string `mapstructure:"db"`
+}
+type SessionRedisConfig struct {
+	Host     string `mapstructure:"host"`
+	Port     string `mapstructure:"port"`
+	Password string `mapstructure:"password"`
+	DB       int    `mapstructure:"db"`
 }
 
 func Read() (*Config, error) {

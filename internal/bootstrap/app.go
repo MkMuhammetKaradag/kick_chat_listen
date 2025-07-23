@@ -11,10 +11,11 @@ import (
 )
 
 type App struct {
-	config       *config.Config
-	fiberApp     *fiber.App
-	httpHandlers *Handlers
-	postgresRepo PostgresRepository
+	config         *config.Config
+	fiberApp       *fiber.App
+	httpHandlers   *Handlers
+	postgresRepo   PostgresRepository
+	sessionManager SessionManager
 }
 
 func NewApp(config *config.Config) (*App, error) {
@@ -28,12 +29,12 @@ func NewApp(config *config.Config) (*App, error) {
 }
 
 func (a *App) initDependencies() {
-
+	a.sessionManager = InitSessionRedis(a.config)
 	//database bağlantisi oluştur
 	a.postgresRepo = InitDatabase(a.config)
 
 	// HTTP handler'larını hazırla
-	a.httpHandlers = SetupHTTPHandlers(a.postgresRepo)
+	a.httpHandlers = SetupHTTPHandlers(a.postgresRepo, a.sessionManager)
 
 	// HTTP sunucusu kurulumu
 	a.fiberApp = SetupServer(a.config, a.httpHandlers)

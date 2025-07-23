@@ -353,6 +353,7 @@ func (u *listenUseCase) unmarshallAndSendToChannel(info *ListenerInfo, msgByte [
 		if err := json.Unmarshal(event.Data, &rawDataString); err != nil {
 			return
 		}
+		fmt.Println("rawDataString:", rawDataString)
 		var data Data
 		if err := json.Unmarshal([]byte(rawDataString), &data); err != nil {
 			return

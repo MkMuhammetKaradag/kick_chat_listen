@@ -4,7 +4,6 @@ import (
 	"errors"
 
 	"github.com/gofiber/fiber/v2"
-	"go.uber.org/zap"
 )
 
 func HandleBasic[R Request, Res Response](handler BasicHandler[R, Res]) fiber.Handler {
@@ -39,7 +38,6 @@ func HandleWithFiber[R Request, Res Response](handler FiberHandler[R, Res]) fibe
 		res, err := handler.Handle(c, ctx, &req)
 
 		if err != nil {
-			zap.L().Error("Failed to handle request", zap.Error(err))
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 		}
 

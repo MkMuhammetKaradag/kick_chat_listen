@@ -23,6 +23,7 @@ import (
 
 type ListenUseCase interface {
 	Execute(fbrCtx *fiber.Ctx, ctx context.Context, username string) (string, error)
+	StartActiveListenersOnStartup() error
 }
 
 type ListenPostgresRepository interface {

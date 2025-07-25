@@ -17,68 +17,38 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
-	"github.com/logrusorgru/aurora"
-
 	"github.com/gorilla/websocket"
+	"github.com/logrusorgru/aurora"
 )
 
-type ListenUseCase interface {
-	Execute(fbrCtx *fiber.Ctx, ctx context.Context, username string) (string, error)
-	StartActiveListenersOnStartup() error
+// Configuration
+type Config struct {
+	WebSocketUrl             string
+	ChatroomSubscribeCommand string
+	BatchSize                int
+	MessageBufferSize        int
+	ReconnectInterval        time.Duration
+	MaxReconnectAttempts     int
 }
 
-type ListenPostgresRepository interface {
-	InsertListener(ctx context.Context, streamerUsername string, kickUserID *int, profilePic *string, userID uuid.UUID, newIsActive bool, newEndTime *time.Time, newDuration int) (uuid.UUID, error)
-	// user_id'nin UUID olduğundan emin ol
-	InsertUserListenerRequest(listenerID uuid.UUID, userID uuid.UUID, requestTime time.Time, endTime time.Time) error
-	// Değiştirildi
-
-	GetStreamerByUsername(ctx context.Context, username string) (*struct {
-		ID         uuid.UUID
-		KickUserID sql.NullInt32
-		ProfilePic sql.NullString
-	}, error)
-
-	GetListenerByStreamerIDAndUserID(ctx context.Context, streamerID, userID uuid.UUID) (*struct {
-		ID         uuid.UUID
-		StreamerID uuid.UUID // Now streamer_id
-		UserID     uuid.UUID
-		IsActive   bool
-		EndTime    *time.Time
-		Duration   int
-	}, error)
-	// Değiştirildi
-	GetActiveListeners() ([]domain.ActiveListenerData, error)
-	// Değiştirildi
-	GetUserRequestsForListener(listenerID uuid.UUID) ([]struct {
-		UserID      uuid.UUID
-		RequestTime time.Time
-		EndTime     time.Time
-	}, error)
-	// GÜNCELLENDİ: InsertMessage fonksiyonu link bilgilerini de alıyor
-	InsertMessage(listenerID uuid.UUID, senderUsername, content string, timestamp time.Time, hasLink bool, extractedLinks []string) error
-	// YENİ: Eklenen fonksiyonlar
-	UpdateListenerStatus(listenerID uuid.UUID, isActive bool) error
-	UpdateListenerEndTime(ctx context.Context, listenerID uuid.UUID, endTime time.Time) error
-	GetMessagesByListener(listenerID uuid.UUID, limit, offset int) ([]struct {
-		ID               uuid.UUID
-		SenderUsername   string
-		Content          string
-		MessageTimestamp time.Time
-		HasLink          bool
-		ExtractedLinks   []string
-	}, error)
+var AppConfig = &Config{
+	BatchSize:                10,
+	ChatroomSubscribeCommand: "{\"event\":\"pusher:subscribe\",\"data\":{\"auth\":\"\",\"channel\":\"chatrooms.%d.v2\"}}",
+	WebSocketUrl:             "wss://ws-us2.pusher.com/app/32cbd69e4b950bf97679?protocol=7&client=js&version=8.4.0&flash=false",
+	MessageBufferSize:        1000,
+	ReconnectInterval:        5 * time.Second,
+	MaxReconnectAttempts:     3,
 }
 
-type listenUseCase struct {
-	repo ListenPostgresRepository
-}
+// Link regex compiled once
+var linkRegex = regexp.MustCompile(`https?://[^\s]+`)
 
-// Models - mevcut struct'larınız aynı kalıyor
+// Domain Models
 type Message struct {
 	Event string          `json:"event"`
 	Data  json.RawMessage `json:"data"`
 }
+
 type Identity struct {
 	Color string `json:"color"`
 }
@@ -97,229 +67,278 @@ type Data struct {
 	Timestamp time.Time `json:"timestamp"`
 }
 
-// --- Struct Tanımları ---
-// Config struct'ı (eğer usecase içinde kullanılıyorsa)
-type Config struct {
-	WebSocketUrl             string
-	ChatroomSubscribeCommand string
-	BatchSize                int
-}
-
-type UserRequestInfo struct {
-	UserID      uuid.UUID
-	RequestTime time.Time
-	EndTime     time.Time
-}
-
-type ListenerInfo struct {
-	Username       string
-	Client         *websocket.Conn
-	UserRequests   map[uuid.UUID]UserRequestInfo
-	OverallEndTime time.Time
-	IsGlobalActive bool
-	ListenerDBID   uuid.UUID
-	DataChannel    chan Data // Mesajları işlemek için
-
-	sync.Mutex // Veya sync.RWMutex kullanabilirsiniz
-
-}
-
 type KickUserInfo struct {
 	Chatroom ChatroomInfo `json:"chatroom"`
 	User     UserInfo     `json:"user"`
 }
+
 type UserInfo struct {
 	ID         int    `json:"id"`
 	ProfilePic string `json:"profile_pic"`
 }
+
 type ChatroomInfo struct {
 	ID int `json:"id"`
 }
 
-// ListenerManager struct'ı
+// Enhanced UserRequestInfo with validation
+type UserRequestInfo struct {
+	UserID      uuid.UUID `json:"user_id"`
+	RequestTime time.Time `json:"request_time"`
+	EndTime     time.Time `json:"end_time"`
+}
+
+func (u *UserRequestInfo) IsActive() bool {
+	return time.Now().Before(u.EndTime)
+}
+
+// Enhanced ListenerInfo with better state management
+type ListenerInfo struct {
+	Username          string                        `json:"username"`
+	Client            *websocket.Conn               `json:"-"`
+	UserRequests      map[uuid.UUID]UserRequestInfo `json:"user_requests"`
+	OverallEndTime    time.Time                     `json:"overall_end_time"`
+	IsGlobalActive    bool                          `json:"is_global_active"`
+	ListenerDBID      uuid.UUID                     `json:"listener_db_id"`
+	DataChannel       chan Data                     `json:"-"`
+	StopChannel       chan struct{}                 `json:"-"`
+	ReconnectAttempts int                           `json:"reconnect_attempts"`
+	LastActivity      time.Time                     `json:"last_activity"`
+
+	mu sync.RWMutex
+}
+
+// Thread-safe methods for ListenerInfo
+func (l *ListenerInfo) SetActive(active bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.IsGlobalActive = active
+	l.LastActivity = time.Now()
+}
+
+func (l *ListenerInfo) IsActive() bool {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.IsGlobalActive
+}
+
+func (l *ListenerInfo) AddUserRequest(userID uuid.UUID, endTime time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	l.UserRequests[userID] = UserRequestInfo{
+		UserID:      userID,
+		RequestTime: time.Now(),
+		EndTime:     endTime,
+	}
+
+	// Update overall end time if necessary
+	if endTime.After(l.OverallEndTime) {
+		l.OverallEndTime = endTime
+	}
+	l.LastActivity = time.Now()
+}
+
+func (l *ListenerInfo) RemoveExpiredRequests() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	now := time.Now()
+	for userID, request := range l.UserRequests {
+		if now.After(request.EndTime) {
+			delete(l.UserRequests, userID)
+		}
+	}
+}
+
+func (l *ListenerInfo) HasActiveRequests() bool {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	now := time.Now()
+	for _, request := range l.UserRequests {
+		if now.Before(request.EndTime) {
+			return true
+		}
+	}
+	return false
+}
+
+func (l *ListenerInfo) GetActiveRequestCount() int {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	count := 0
+	now := time.Now()
+	for _, request := range l.UserRequests {
+		if now.Before(request.EndTime) {
+			count++
+		}
+	}
+	return count
+}
+
+// Enhanced ListenerManager with better concurrency
 type ListenerManagerType struct {
-	sync.RWMutex
 	listeners map[string]*ListenerInfo
+	mu        sync.RWMutex
 }
 
-// Global ListenerManager örneği
-var ListenerManager *ListenerManagerType
-var AppConfig *Config = &Config{
-	BatchSize:                10,
-	ChatroomSubscribeCommand: "{\"event\":\"pusher:subscribe\",\"data\":{\"auth\":\"\",\"channel\":\"chatrooms.%d.v2\"}}",
-	WebSocketUrl:             "wss://ws-us2.pusher.com/app/32cbd69e4b950bf97679?protocol=7&client=js&version=8.4.0&flash=false",
-} // Eğer config'i de buraya alırsanız
-
-// --- Helper Fonksiyonlar ---
-// getKnownChatId, askForManualChatId, GetChatIdFromKick, startListening, unmarshallAndSendToChannel, InsertMessage vb. fonksiyonlar
-// getChatId fonksiyonu: Hem bilinen ID'leri, hem API'yi, hem de manuel girişi birleştirmeli.
-func getChatId(username string) (int, error) {
-	// 1. Bilinen ID'leri kontrol et
-	if knownId := getKnownChatId(username); knownId != 0 {
-		fmt.Println("localde kayıtlıydı:", knownId)
-		return knownId, nil
-	}
-
-	// 2. API'den almaya çalış (RapidAPI)
-	info, err := GetChatIdFromKick(username)
-	if err != nil {
-		return 0, err
-	}
-
-	return info.Chatroom.ID, nil
-
+func (lm *ListenerManagerType) GetListener(username string) (*ListenerInfo, bool) {
+	lm.mu.RLock()
+	defer lm.mu.RUnlock()
+	listener, exists := lm.listeners[username]
+	return listener, exists
 }
-func (u *listenUseCase) startListening(info *ListenerInfo) {
-	// Initial state setup (already exists in your code)
-	info.Lock()
-	info.IsGlobalActive = true
-	info.Unlock()
 
-	defer func() {
-		log.Printf("'%s' için sohbet dinleme goroutine'i sonlanıyor.", info.Username)
-		// Goroutine sona erdiğinde IsGlobalActive'ı false yap.
-		info.Lock()
-		info.IsGlobalActive = false
-		info.Unlock()
+func (lm *ListenerManagerType) AddListener(username string, info *ListenerInfo) {
+	lm.mu.Lock()
+	defer lm.mu.Unlock()
+	lm.listeners[username] = info
+}
 
-		// Veritabanında dinleyicinin durumunu pasif olarak güncelle.
-		// NOTE: Make sure UpdateListenerStatus accepts context if needed
-		if err := u.repo.UpdateListenerStatus(info.ListenerDBID, false); err != nil {
-			log.Printf("'%s' için veritabanı listener durumu güncellenirken hata: %v", info.Username, err)
-		}
-
-		// ListenerManager'dan bu dinleyiciyi kaldır.
-		ListenerManager.Lock()
-		delete(ListenerManager.listeners, info.Username)
-		ListenerManager.Unlock()
-
-		if info.Client != nil {
-			info.Client.Close() // WebSocket bağlantısını kapat
-		}
-		log.Printf("'%s' için tüm temizlik işlemleri tamamlandı.", info.Username)
-	}()
-
-	// --- WebSocket Connection and Subscription ---
-	chatId, err := getChatId(info.Username) // Assuming getChatId is defined elsewhere
-	if err != nil {
-		log.Printf("'%s' için chat ID alınamadı: %v. Dinleme başlatılamıyor.", info.Username, err)
-		return
-	}
-	log.Printf("'%s' için Chat ID: %d bulundu.", info.Username, chatId)
-
-	dialer := websocket.Dialer{}
-	wsURL := AppConfig.WebSocketUrl
-	subscribeMsg := fmt.Sprintf(AppConfig.ChatroomSubscribeCommand, chatId)
-
-	conn, _, err := dialer.Dial(wsURL, nil)
-	if err != nil {
-		log.Printf("❌ '%s' (ID: %d) için websocket bağlantı hatası: %v", info.Username, chatId, err)
-		return
-	}
-	info.Client = conn
-	log.Printf("✅ '%s' (ID: %d) için websocket bağlandı.", info.Username, chatId)
-
-	err = conn.WriteMessage(websocket.TextMessage, []byte(subscribeMsg))
-	if err != nil {
-		log.Printf("❌ '%s' (ID: %d) için subscribe mesajı gönderme hatası: %v", info.Username, chatId, err)
-		return
-	}
-	log.Printf("✅ '%s' (ID: %d) için subscribe mesajı gönderildi.", info.Username, chatId)
-
-	// --- Message Listening and Processing Loop ---
-	// Use a context for graceful shutdown of the ReadMessage goroutine
-	readCtx, cancelRead := context.WithCancel(context.Background())
-	defer cancelRead() // Ensure cancellation when startListening exits
-
-	// Goroutine to continuously read messages from WebSocket
-	go func() {
-		for {
-			select {
-			case <-readCtx.Done():
-				log.Printf("'%s' için WebSocket okuma goroutine'i sonlandırılıyor.", info.Username)
-				return // Exit this goroutine
-			default:
-				_, msgByte, readErr := conn.ReadMessage()
-				if readErr != nil {
-					if websocket.IsCloseError(readErr, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
-						log.Printf("'%s' için WebSocket bağlantısı normal şekilde kapatıldı.", info.Username)
-					} else {
-						log.Printf("❌ '%s' için mesaj okuma hatası: %v", info.Username, readErr)
-					}
-					// If there's a read error, cancel the context to signal main loop to stop
-					cancelRead()
-					return
-				}
-				// Pass the raw message bytes to the unmarshaller.
-				// This part remains a separate goroutine if unmarshalling is heavy.
-				go u.unmarshallAndSendToChannel(info, msgByte)
-			}
-		}
-	}()
-
-	// Main loop to process messages from DataChannel and check listening conditions
-	for {
-		// Use a ticker for periodic checks (e.g., every second)
-		// This prevents the loop from spinning too fast when no messages are coming from WebSocket
-		ticker := time.NewTicker(1 * time.Second)
+func (lm *ListenerManagerType) RemoveListener(username string) {
+	lm.mu.Lock()
+	defer lm.mu.Unlock()
+	if listener, exists := lm.listeners[username]; exists {
+		// Close channels safely
 		select {
-		case data := <-info.DataChannel: // <-- CONSUME MESSAGES FROM THE CHANNEL HERE!
-			// A message was received from the DataChannel, process it.
-			// This is where you would typically send it to connected clients
-			// or perform further processing.
-			// The printing logic that was in unmarshallAndSendToChannel is moved here.
-			if linkRegex.MatchString(data.Content) {
-				links := linkRegex.FindAllString(data.Content, -1)
-				fmt.Print(aurora.Colorize(fmt.Sprintf("💬 %s:%s:%s\n", info.Username, data.Sender.Username, data.Content), utils.GetColorFromHex(data.Sender.Identity.Color)))
-				for _, link := range links {
-					fmt.Print(aurora.Colorize(fmt.Sprintf("🔗 [%s] %s LINK: %s\n", info.Username, data.Sender.Username, link), aurora.YellowFg|aurora.BoldFm))
-				}
-			} else {
-				fmt.Print(aurora.Colorize(fmt.Sprintf("💬 %s:%s:%s\n", info.Username, data.Sender.Username, data.Content), utils.GetColorFromHex(data.Sender.Identity.Color)))
-			}
-			// Add any other processing here, e.g., saving to DB
-			// go u.saveMessageToDB(info, data) // If you uncomment this, ensure it's safe for concurrency
-
-		case <-ticker.C: // Periodic check
-			// Check listening conditions
-			info.Lock()
-			isActive := info.IsGlobalActive
-			overallEndTime := info.OverallEndTime
-			numUserRequests := len(info.UserRequests)
-			info.Unlock()
-
-			if !isActive || (overallEndTime.Before(time.Now()) && numUserRequests == 0) {
-				log.Printf("'%s' için dinleme koşulları artık geçerli değil. Ana döngü kapatılıyor.", info.Username)
-				return // Exit the main loop, defer will clean up
-			}
-		case <-readCtx.Done(): // If the WebSocket reading goroutine signaled an error or closure
-			log.Printf("'%s' için WebSocket okuma goroutine'i sonlandığını algıladı. Ana döngü sonlandırılıyor.", info.Username)
-			return // Exit the main loop, defer will clean up
+		case <-listener.StopChannel:
+		default:
+			close(listener.StopChannel)
 		}
-		ticker.Stop() // Stop the ticker in each iteration to avoid multiple tickers
+		delete(lm.listeners, username)
 	}
 }
 
-// NewListenerManager constructor
+func (lm *ListenerManagerType) GetActiveListenerCount() int {
+	lm.mu.RLock()
+	defer lm.mu.RUnlock()
+
+	count := 0
+	for _, listener := range lm.listeners {
+		if listener.IsActive() {
+			count++
+		}
+	}
+	return count
+}
+
+// Cleanup expired listeners periodically
+func (lm *ListenerManagerType) StartCleanupRoutine(ctx context.Context) {
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			lm.cleanupExpiredListeners()
+		}
+	}
+}
+
+func (lm *ListenerManagerType) cleanupExpiredListeners() {
+	lm.mu.Lock()
+	defer lm.mu.Unlock()
+
+	now := time.Now()
+	fmt.Println("now:", now)
+	for username, listener := range lm.listeners {
+		// Remove expired requests first
+		listener.RemoveExpiredRequests()
+
+		// If no active requests and listener is inactive, remove it
+		if !listener.HasActiveRequests() && !listener.IsActive() {
+			log.Printf("Cleaning up expired listener for '%s'", username)
+			select {
+			case <-listener.StopChannel:
+			default:
+				close(listener.StopChannel)
+			}
+			delete(lm.listeners, username)
+		}
+	}
+}
+
+// Global ListenerManager
+var ListenerManager = NewListenerManager()
+
 func NewListenerManager() *ListenerManagerType {
 	return &ListenerManagerType{
 		listeners: make(map[string]*ListenerInfo),
 	}
 }
 
+// Repository interface remains the same
+type ListenPostgresRepository interface {
+	InsertListener(ctx context.Context, streamerUsername string, kickUserID *int, profilePic *string, userID uuid.UUID, newIsActive bool, newEndTime *time.Time, newDuration int) (uuid.UUID, error)
+	InsertUserListenerRequest(listenerID uuid.UUID, userID uuid.UUID, requestTime time.Time, endTime time.Time) error
+	GetStreamerByUsername(ctx context.Context, username string) (*struct {
+		ID         uuid.UUID
+		KickUserID sql.NullInt32
+		ProfilePic sql.NullString
+	}, error)
+	GetListenerByStreamerIDAndUserID(ctx context.Context, streamerID, userID uuid.UUID) (*struct {
+		ID         uuid.UUID
+		StreamerID uuid.UUID
+		UserID     uuid.UUID
+		IsActive   bool
+		EndTime    *time.Time
+		Duration   int
+	}, error)
+	GetActiveListeners() ([]domain.ActiveListenerData, error)
+	GetUserRequestsForListener(listenerID uuid.UUID) ([]struct {
+		UserID      uuid.UUID
+		RequestTime time.Time
+		EndTime     time.Time
+	}, error)
+	InsertMessage(listenerID uuid.UUID, senderUsername, content string, timestamp time.Time, hasLink bool, extractedLinks []string) error
+	UpdateListenerStatus(listenerID uuid.UUID, isActive bool) error
+	UpdateListenerEndTime(ctx context.Context, listenerID uuid.UUID, endTime time.Time) error
+	GetMessagesByListener(listenerID uuid.UUID, limit, offset int) ([]struct {
+		ID               uuid.UUID
+		SenderUsername   string
+		Content          string
+		MessageTimestamp time.Time
+		HasLink          bool
+		ExtractedLinks   []string
+	}, error)
+}
+
+// UseCase interface and implementation
+type ListenUseCase interface {
+	Execute(fbrCtx *fiber.Ctx, ctx context.Context, username string) (string, error)
+	StartActiveListenersOnStartup() error
+	StopListener(username string) error
+	GetListenerStats() map[string]interface{}
+}
+
+type listenUseCase struct {
+	repo   ListenPostgresRepository
+	config *Config
+}
+
 func NewListenUseCase(repo ListenPostgresRepository) ListenUseCase {
 	return &listenUseCase{
-		repo: repo,
+		repo:   repo,
+		config: AppConfig,
 	}
 }
 
-var linkRegex = regexp.MustCompile(`https?://[^\s]+`)
-
+// Enhanced Execute method with better error handling
 func (u *listenUseCase) Execute(fbrCtx *fiber.Ctx, ctx context.Context, username string) (string, error) {
+	// Validate input
+	if username == "" {
+		return "", fmt.Errorf("username cannot be empty")
+	}
+
 	userData, ok := middleware.GetUserData(fbrCtx)
 	if !ok {
 		return "", domain.ErrNotFoundAuthorization
 	}
+
 	currentUserID, err := uuid.Parse(userData.UserID)
 	if err != nil {
 		return "", domain.ErrNotFoundAuthorization
@@ -328,173 +347,359 @@ func (u *listenUseCase) Execute(fbrCtx *fiber.Ctx, ctx context.Context, username
 	durationToAdd := 5 * time.Hour
 	endTimeToAdd := time.Now().Add(durationToAdd)
 
-	// Get Kick user info (kick_user_id and profile_pic)
-	kickUserInfo, err := GetChatIdFromKick(username) // Assuming GetChatIdFromKick returns a struct with .User.ID and .User.ProfilePic
+	// Get Kick user info with timeout context
+	kickCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	kickUserInfo, err := u.getChatIdFromKickWithContext(kickCtx, username)
 	if err != nil {
-		return "Sunucu hatası", fmt.Errorf("gönderilen kullanıcının bilgileri alınırken hatayla karşılaşıldı: %w", err)
+		return "Sunucu hatası", fmt.Errorf("kullanıcı bilgileri alınamadı: %w", err)
 	}
 
-	if ListenerManager == nil {
-		log.Println("FATAL ERROR: ListenerManager başlatılmamış (nil)!")
-		return "Sunucu hatası", fmt.Errorf("listener manager başlatılmamış")
+	// Handle listener logic
+	listenerInfo, exists := ListenerManager.GetListener(username)
+
+	if !exists {
+		// Create new listener
+		return u.createNewListener(ctx, username, currentUserID, endTimeToAdd, durationToAdd, kickUserInfo)
 	}
 
-	ListenerManager.Lock()
-	defer ListenerManager.Unlock()
+	// Update existing listener
+	return u.updateExistingListener(ctx, listenerInfo, currentUserID, endTimeToAdd, username)
+}
 
-	listenerInfo, exists := ListenerManager.listeners[username]
-	var listenerID uuid.UUID
-	shouldStartNewListener := false
+func (u *listenUseCase) createNewListener(ctx context.Context, username string, userID uuid.UUID, endTime time.Time, duration time.Duration, kickInfo *KickUserInfo) (string, error) {
+	kickUserID := &kickInfo.User.ID
+	profilePic := &kickInfo.User.ProfilePic
 
-	// Try to get streamer from DB first
-	streamerData, err := u.repo.GetStreamerByUsername(ctx, username)
+	listenerID, err := u.repo.InsertListener(
+		ctx,
+		username,
+		kickUserID,
+		profilePic,
+		userID,
+		true,
+		&endTime,
+		int(duration.Seconds()),
+	)
 	if err != nil {
-		log.Printf("Streamer '%s' bilgileri alınırken hata: %v", username, err)
-		return "Veritabanı hatası.", err
+		return "Veritabanı hatası", fmt.Errorf("listener oluşturulamadı: %w", err)
 	}
 
-	var streamerID uuid.UUID
-	var kickUserID *int
-	var profilePic *string
+	listenerInfo := &ListenerInfo{
+		Username:       username,
+		UserRequests:   make(map[uuid.UUID]UserRequestInfo),
+		OverallEndTime: endTime,
+		ListenerDBID:   listenerID,
+		DataChannel:    make(chan Data, u.config.MessageBufferSize),
+		StopChannel:    make(chan struct{}),
+		LastActivity:   time.Now(),
+	}
 
-	if streamerData == nil {
-		// Streamer doesn't exist in DB, create it
-		log.Printf("Streamer '%s' veritabanında bulunamadı, oluşturuluyor...", username)
-		kickUserID = &kickUserInfo.User.ID         // Assuming Kick API returns int ID
-		profilePic = &kickUserInfo.User.ProfilePic // Assuming Kick API returns string URL
+	listenerInfo.AddUserRequest(userID, endTime)
+	ListenerManager.AddListener(username, listenerInfo)
 
-		// InsertListener handles streamer creation if not exists.
-		// So, we just need to ensure we pass kickUserID and profilePic correctly.
-		// We'll proceed to the InsertListener call below, which will handle this.
-	} else {
-		// Streamer exists in DB, use its ID
-		streamerID = streamerData.ID
-		// Populate kickUserID and profilePic from existing streamerData if needed
-		if streamerData.KickUserID.Valid {
-			id := int(streamerData.KickUserID.Int32)
-			kickUserID = &id
+	go u.startListening(listenerInfo)
+
+	return fmt.Sprintf("'%s' kullanıcısının sohbeti dinlenmeye başlandı", username), nil
+}
+
+func (u *listenUseCase) updateExistingListener(ctx context.Context, listenerInfo *ListenerInfo, userID uuid.UUID, endTime time.Time, username string) (string, error) {
+	listenerInfo.AddUserRequest(userID, endTime)
+
+	// Update DB if necessary
+	if endTime.After(listenerInfo.OverallEndTime) {
+		if err := u.repo.UpdateListenerEndTime(ctx, listenerInfo.ListenerDBID, endTime); err != nil {
+			log.Printf("Listener end time güncellenirken hata: %v", err)
 		}
-		if streamerData.ProfilePic.Valid {
-			pic := streamerData.ProfilePic.String
-			profilePic = &pic
-		}
 	}
 
-	// Check for listener specific to this user and streamer
-	// IMPORTANT: Your `listeners` table now has `UNIQUE(streamer_id, user_id)`.
-	// So, we should be looking for a listener entry for the specific `currentUserID`
-	// and the `streamerID` we just obtained/created.
-	dbListenerData, err := u.repo.GetListenerByStreamerIDAndUserID(ctx, streamerID, currentUserID)
-	if err != nil {
-		log.Printf("'%s' ve '%s' için veritabanı listener kontrol hatası: %v", username, currentUserID, err)
-		return "Veritabanı hatası.", err
+	// Restart if not active
+	if !listenerInfo.IsActive() {
+		go u.startListening(listenerInfo)
+		return fmt.Sprintf("'%s' kullanıcısının sohbeti yeniden başlatıldı", username), nil
 	}
 
-	if !exists { // Listener for 'username' not in memory (ListenerManager.listeners)
-		if dbListenerData == nil {
-			// Not in memory, not in DB for this specific user-streamer pair.
-			// Create a new listener record and add to memory.
-			log.Printf("'%s' kullanıcısı için '%s' dinleyici kaydı bulunamadı, oluşturuluyor...", currentUserID, username)
-			newListenerID, insertErr := u.repo.InsertListener(
-				ctx,
-				username,
-				kickUserID, // Pass kickUserID
-				profilePic, // Pass profilePic
-				currentUserID,
-				true, // is_active
-				&endTimeToAdd,
-				int(durationToAdd.Seconds()),
-			)
-			if insertErr != nil {
-				log.Printf("Veritabanına yeni listener eklenirken hata: %v", insertErr)
-				return "Veritabanı hatası.", insertErr
-			}
-			listenerID = newListenerID
-			listenerInfo = &ListenerInfo{
-				Username:       username,
-				UserRequests:   make(map[uuid.UUID]UserRequestInfo),
-				OverallEndTime: endTimeToAdd,
-				IsGlobalActive: false, // Will become true when startListening runs
-				ListenerDBID:   listenerID,
-				DataChannel:    make(chan Data, 1000),
-			}
-			ListenerManager.listeners[username] = listenerInfo
-			shouldStartNewListener = true // New listener needs to be started
-		} else {
-			// Listener for this user-streamer pair found in DB but not in memory.
-			// Reload it into memory.
-			listenerID = dbListenerData.ID
-			listenerInfo = &ListenerInfo{
-				Username:       username,
-				UserRequests:   make(map[uuid.UUID]UserRequestInfo),
-				OverallEndTime: *dbListenerData.EndTime,
-				IsGlobalActive: dbListenerData.IsActive,
-				ListenerDBID:   listenerID,
-				DataChannel:    make(chan Data, 100),
-			}
+	return fmt.Sprintf("'%s' kullanıcısının sohbet dinleme süresi güncellendi", username), nil
+}
 
-			// Load existing user requests for this listener if any
-			if userRequests, reqErr := u.repo.GetUserRequestsForListener(listenerID); reqErr == nil {
-				for _, req := range userRequests {
-					listenerInfo.UserRequests[req.UserID] = UserRequestInfo{
-						UserID:      req.UserID,
-						RequestTime: req.RequestTime,
-						EndTime:     req.EndTime,
-					}
+// Enhanced startListening with better error handling and reconnection
+func (u *listenUseCase) startListening(info *ListenerInfo) {
+	defer u.cleanupListener(info)
+
+	info.SetActive(true)
+	log.Printf("'%s' için sohbet dinleme başlatılıyor", info.Username)
+
+	for {
+		select {
+		case <-info.StopChannel:
+			log.Printf("'%s' için stop signal alındı", info.Username)
+			return
+		default:
+			if err := u.runListeningLoop(info); err != nil {
+				log.Printf("'%s' için listening loop hatası: %v", info.Username, err)
+
+				if info.ReconnectAttempts >= u.config.MaxReconnectAttempts {
+					log.Printf("'%s' için maksimum reconnect denemesi aşıldı", info.Username)
+					return
 				}
-			} else {
-				log.Printf("Error loading user requests for listener %s: %v", listenerID, reqErr)
-			}
 
-			// Update overall end time if new request extends it
-			if endTimeToAdd.After(listenerInfo.OverallEndTime) {
-				listenerInfo.OverallEndTime = endTimeToAdd
-				if dbErr := u.repo.UpdateListenerEndTime(ctx, listenerID, endTimeToAdd); dbErr != nil {
-					log.Printf("'%s' için listener end time güncellenirken hata: %v", username, dbErr)
-				}
+				info.ReconnectAttempts++
+				time.Sleep(u.config.ReconnectInterval)
+				continue
 			}
-			ListenerManager.listeners[username] = listenerInfo
-			shouldStartNewListener = !listenerInfo.IsGlobalActive // If not active, start it
+			return
 		}
-	} else {
-		// Listener already in memory.
-		listenerID = listenerInfo.ListenerDBID
-		// Update overall end time if new request extends it
-		if endTimeToAdd.After(listenerInfo.OverallEndTime) {
-			listenerInfo.OverallEndTime = endTimeToAdd
-			if dbErr := u.repo.UpdateListenerEndTime(ctx, listenerID, endTimeToAdd); dbErr != nil {
-				log.Printf("'%s' için listener end time güncellenirken hata: %v", username, dbErr)
-			}
-		}
-		shouldStartNewListener = !listenerInfo.IsGlobalActive // If in memory but not active, restart
-	}
-
-	// Update the specific user's request within this listener's info
-	listenerInfo.Lock() // Assuming ListenerInfo has its own mutex
-	listenerInfo.UserRequests[currentUserID] = UserRequestInfo{
-		UserID:      currentUserID,
-		RequestTime: time.Now(),
-		EndTime:     endTimeToAdd,
-	}
-	listenerInfo.IsGlobalActive = true // If a request comes in, it implies it should be active
-	listenerInfo.Unlock()
-
-	// Global ListenerManager lock is released by defer at the top.
-
-	if shouldStartNewListener {
-		log.Printf("'%s' için sohbet dinleme başlatılıyor...", username)
-		go u.startListening(listenerInfo) // Start new goroutine
-		return fmt.Sprintf("'%s' kullanıcısının sohbeti dinlenmeye başlandı.", username), nil
-	} else {
-		log.Printf("'%s' kullanıcısı zaten dinleniyor. Yeni kullanıcı isteği işleniyor.", username)
-		return fmt.Sprintf("'%s' kullanıcısının sohbetini dinleme süreniz %s olarak ayarlandı.", username, endTimeToAdd.Format(time.RFC3339)), nil
 	}
 }
 
-// Geri kalan fonksiyonlar aynı kalıyor...
+func (u *listenUseCase) runListeningLoop(info *ListenerInfo) error {
+	chatId, err := u.getChatId(info.Username)
+	if err != nil {
+		return fmt.Errorf("chat ID alınamadı: %w", err)
+	}
+
+	conn, err := u.connectWebSocket(chatId)
+	if err != nil {
+		return fmt.Errorf("websocket bağlantısı kurulamadı: %w", err)
+	}
+	defer conn.Close()
+
+	info.Client = conn
+	info.ReconnectAttempts = 0 // Reset on successful connection
+
+	// Start message reading goroutine
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go u.readMessages(ctx, info, conn)
+
+	// Main processing loop
+	return u.processMessages(info, cancel)
+}
+
+func (u *listenUseCase) connectWebSocket(chatId int) (*websocket.Conn, error) {
+	dialer := websocket.Dialer{
+		HandshakeTimeout: 10 * time.Second,
+	}
+
+	conn, _, err := dialer.Dial(u.config.WebSocketUrl, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	subscribeMsg := fmt.Sprintf(u.config.ChatroomSubscribeCommand, chatId)
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(subscribeMsg)); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("subscribe mesajı gönderilemedi: %w", err)
+	}
+
+	return conn, nil
+}
+
+func (u *listenUseCase) readMessages(ctx context.Context, info *ListenerInfo, conn *websocket.Conn) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			_, msgByte, err := conn.ReadMessage()
+			if err != nil {
+				if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+					log.Printf("'%s' için WebSocket normal şekilde kapatıldı", info.Username)
+				} else {
+					log.Printf("'%s' için mesaj okuma hatası: %v", info.Username, err)
+				}
+				return
+			}
+
+			go u.unmarshallAndSendToChannel(info, msgByte)
+		}
+	}
+}
+
+func (u *listenUseCase) processMessages(info *ListenerInfo, cancel context.CancelFunc) error {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case data := <-info.DataChannel:
+			u.handleMessage(info, data)
+
+		case <-ticker.C:
+			if !u.shouldContinueListening(info) {
+				cancel()
+				return nil
+			}
+
+		case <-info.StopChannel:
+			cancel()
+			return nil
+		}
+	}
+}
+
+func (u *listenUseCase) shouldContinueListening(info *ListenerInfo) bool {
+	if !info.IsActive() {
+		return false
+	}
+
+	info.RemoveExpiredRequests()
+	return info.HasActiveRequests() || time.Now().Before(info.OverallEndTime)
+}
+
+func (u *listenUseCase) handleMessage(info *ListenerInfo, data Data) {
+	// Display message with color
+	if linkRegex.MatchString(data.Content) {
+		links := linkRegex.FindAllString(data.Content, -1)
+		fmt.Print(aurora.Colorize(
+			fmt.Sprintf("💬 %s:%s:%s\n", info.Username, data.Sender.Username, data.Content),
+			utils.GetColorFromHex(data.Sender.Identity.Color),
+		))
+		for _, link := range links {
+			fmt.Print(aurora.Colorize(
+				fmt.Sprintf("🔗 [%s] %s LINK: %s\n", info.Username, data.Sender.Username, link),
+				aurora.YellowFg|aurora.BoldFm,
+			))
+		}
+	} else {
+		fmt.Print(aurora.Colorize(
+			fmt.Sprintf("💬 %s:%s:%s\n", info.Username, data.Sender.Username, data.Content),
+			utils.GetColorFromHex(data.Sender.Identity.Color),
+		))
+	}
+
+	// Save to database asynchronously
+	// go u.saveMessageToDB(info, data)
+}
+
+func (u *listenUseCase) cleanupListener(info *ListenerInfo) {
+	log.Printf("'%s' için cleanup başlatılıyor", info.Username)
+
+	info.SetActive(false)
+
+	if err := u.repo.UpdateListenerStatus(info.ListenerDBID, false); err != nil {
+		log.Printf("'%s' için veritabanı durumu güncellenirken hata: %v", info.Username, err)
+	}
+
+	ListenerManager.RemoveListener(info.Username)
+
+	if info.Client != nil {
+		info.Client.Close()
+	}
+
+	log.Printf("'%s' için cleanup tamamlandı", info.Username)
+}
+
+// API helper methods with better error handling
+func (u *listenUseCase) getChatId(username string) (int, error) {
+	if knownId := getKnownChatId(username); knownId != 0 {
+		return knownId, nil
+	}
+
+	info, err := GetChatIdFromKick(username)
+	if err != nil {
+		return 0, err
+	}
+
+	return info.Chatroom.ID, nil
+}
+
+func (u *listenUseCase) getChatIdFromKickWithContext(ctx context.Context, username string) (*KickUserInfo, error) {
+	type result struct {
+		info *KickUserInfo
+		err  error
+	}
+
+	ch := make(chan result, 1)
+	go func() {
+		info, err := GetChatIdFromKick(username)
+		ch <- result{info, err}
+	}()
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case res := <-ch:
+		return res.info, res.err
+	}
+}
+
+// Additional utility methods
+func (u *listenUseCase) StopListener(username string) error {
+	listenerInfo, exists := ListenerManager.GetListener(username)
+	if !exists {
+		return fmt.Errorf("listener not found for username: %s", username)
+	}
+
+	select {
+	case listenerInfo.StopChannel <- struct{}{}:
+		return nil
+	default:
+		return fmt.Errorf("failed to send stop signal")
+	}
+}
+
+func (u *listenUseCase) GetListenerStats() map[string]interface{} {
+	return map[string]interface{}{
+		"active_listeners": ListenerManager.GetActiveListenerCount(),
+		"total_listeners":  len(ListenerManager.listeners),
+	}
+}
+
+
+
+// Message processing
+func (u *listenUseCase) unmarshallAndSendToChannel(info *ListenerInfo, msgByte []byte) {
+	var event Message
+	if err := json.Unmarshal(msgByte, &event); err != nil {
+		log.Printf("JSON unmarshal event hatası: %v", err)
+		return
+	}
+
+	if event.Event == "App\\Events\\ChatMessageEvent" {
+		var rawDataString string
+		if err := json.Unmarshal(event.Data, &rawDataString); err != nil {
+			log.Printf("JSON unmarshal rawDataString hatası: %v", err)
+			return
+		}
+
+		var data Data
+		if err := json.Unmarshal([]byte(rawDataString), &data); err != nil {
+			log.Printf("JSON unmarshal data hatası: %v", err)
+			return
+		}
+
+		if data.Type == "message" {
+			select {
+			case info.DataChannel <- data:
+				// Successfully sent
+			default:
+				log.Printf("'%s' için data channel dolu, mesaj atlanıyor", info.Username)
+			}
+		}
+	}
+}
+
+func (u *listenUseCase) saveMessageToDB(info *ListenerInfo, data Data) {
+	hasLink := linkRegex.MatchString(data.Content)
+	var extractedLinks []string
+
+	if hasLink {
+		extractedLinks = linkRegex.FindAllString(data.Content, -1)
+	}
+
+	err := u.repo.InsertMessage(info.ListenerDBID, data.Sender.Username, data.Content, data.Timestamp, hasLink, extractedLinks)
+	if err != nil {
+		log.Printf("'%s' için mesaj veritabanına kaydedilirken hata: %v", info.Username, err)
+	}
+}
+
+// Helper functions (kept same for compatibility)
 func getKnownChatId(username string) int {
 	knownChatIds := map[string]int{
-		// "buraksakinol": 25461130,
+		// Add known chat IDs here
 	}
 	if chatId, exists := knownChatIds[username]; exists {
 		return chatId
@@ -512,54 +717,9 @@ var GetChatIdFromKick = func(username string) (*KickUserInfo, error) {
 			return chatId, nil
 		}
 	}
-
 	return nil, fmt.Errorf("tüm yöntemler başarısız")
 }
 
-func getChatIdFromRapidAPI(username string) (int, error) {
-	apikey := ""
-
-	client := &http.Client{Timeout: 10 * time.Second}
-	url := fmt.Sprintf("https://kick-com-api.p.rapidapi.com/channels/%s/chatroom", username)
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return 0, fmt.Errorf("istek oluşturulamadı: %w", err)
-	}
-	req.Header.Add("x-rapidapi-key", apikey)
-	req.Header.Add("x-rapidapi-host", "kick-com-api.p.rapidapi.com")
-	fmt.Println("4")
-	resp, err := client.Do(req)
-	if err != nil {
-		return 0, fmt.Errorf("istek gönderilemedi: %w", err)
-	}
-	defer resp.Body.Close()
-	fmt.Println("3")
-	if resp.StatusCode != 200 {
-		fmt.Println(resp)
-		return 0, fmt.Errorf("RapidAPI isteği başarısız: HTTP %d", resp.StatusCode)
-	}
-	fmt.Println("2")
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return 0, fmt.Errorf("cevap okunamadı: %w", err)
-	}
-
-	var result struct {
-		Data struct {
-			ID int `json:"id"`
-		} `json:"data"`
-	}
-	fmt.Println("1")
-	if err := json.Unmarshal(body, &result); err != nil {
-		return 0, fmt.Errorf("JSON parse hatası: %w", err)
-	}
-
-	if result.Data.ID == 0 {
-		return 0, fmt.Errorf("chat ID bulunamadı (0 döndü)")
-	}
-	fmt.Println("kullanıcı:id:", result.Data.ID)
-	return result.Data.ID, nil
-}
 func getChatIdFromVercelAPI(username string) (*KickUserInfo, error) {
 	client := &http.Client{Timeout: 10 * time.Second}
 	url := fmt.Sprintf("https://kick-api-provider.vercel.app/api/channel?username=%s", username)
@@ -585,7 +745,6 @@ func getChatIdFromVercelAPI(username string) (*KickUserInfo, error) {
 	}
 
 	var result KickUserInfo
-
 	if err := json.Unmarshal(body, &result); err != nil {
 		return nil, fmt.Errorf("JSON parse hatası: %w", err)
 	}
@@ -594,56 +753,5 @@ func getChatIdFromVercelAPI(username string) (*KickUserInfo, error) {
 		return nil, fmt.Errorf("chat ID bulunamadı (0 döndü)")
 	}
 
-	fmt.Println("kullanıcı id:", result.Chatroom.ID)
 	return &result, nil
-}
-
-func (u *listenUseCase) unmarshallAndSendToChannel(info *ListenerInfo, msgByte []byte) {
-	var event Message
-	if err := json.Unmarshal(msgByte, &event); err != nil {
-		log.Printf("JSON unmarshal event hatası: %v", err)
-		return
-	}
-
-	if event.Event == "App\\Events\\ChatMessageEvent" {
-		var rawDataString string
-		if err := json.Unmarshal(event.Data, &rawDataString); err != nil {
-			log.Printf("JSON unmarshal rawDataString hatası: %v", err)
-			return
-		}
-
-		var data Data
-		if err := json.Unmarshal([]byte(rawDataString), &data); err != nil {
-			log.Printf("JSON unmarshal data hatası: %v", err)
-			return
-		}
-
-		if data.Type == "message" {
-			select {
-			case info.DataChannel <- data:
-				// Başarıyla gönderildi
-			default:
-				log.Printf("'%s' için data channel dolu, mesaj atlanıyor.", info.Username)
-			}
-		}
-	}
-}
-
-// YENİ: Mesajı veritabanına kaydetme fonksiyonu
-func (u *listenUseCase) saveMessageToDB(info *ListenerInfo, data Data) {
-	// Link kontrolü yap
-	hasLink := linkRegex.MatchString(data.Content)
-	var extractedLinks []string
-
-	if hasLink {
-		extractedLinks = linkRegex.FindAllString(data.Content, -1)
-	}
-
-	// Veritabanına kaydet
-	err := u.repo.InsertMessage(info.ListenerDBID, data.Sender.Username, data.Content, data.Timestamp, hasLink, extractedLinks)
-	if err != nil {
-		log.Printf("'%s' için mesaj veritabanına kaydedilirken hata: %v", info.Username, err)
-	} else {
-		log.Printf("✅ Mesaj kaydedildi: %s -> %s: %s", info.Username, data.Sender.Username, data.Content)
-	}
 }
